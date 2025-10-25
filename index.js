@@ -110,8 +110,8 @@ blockedSlotSchema.index({ date: 1, time_slot: 1 }, { unique: true });
 
 
 // Indexes
-bookingSchema.index({ appointment_time: 1 });
-bookingSchema.index({ status: 1 });
+bookingSchema.index({ appointment_time: 1, status: 1 });
+bookingSchema.index({ email: 1 });
 
 const User = mongoose.model('User', userSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
@@ -1396,114 +1396,414 @@ const sendAdminNotificationEmail = async (bookings) => {
 //   }
 // });
 
+// app.post('/bookings', async (req, res) => {
+//   try {
+//     // Check if it's a bulk booking request
+//     const isBulkBooking = Array.isArray(req.body);
+//     const bookingsData = isBulkBooking ? req.body : [req.body];
+
+//     // Validate all bookings first
+//     const validationErrors = [];
+//     bookingsData.forEach((booking, index) => {
+//       if (!booking.customer_name || !booking.phone_number || !booking.appointment_time) {
+//         validationErrors.push({
+//           index,
+//           customer_name: booking.customer_name || 'Unknown',
+//           message: 'Missing required fields',
+//           missing_fields: [
+//             !booking.customer_name && 'customer_name',
+//             !booking.phone_number && 'phone_number',
+//             !booking.appointment_time && 'appointment_time'
+//           ].filter(Boolean)
+//         });
+//       }
+      
+//       // Validate appointment_time format
+//       if (booking.appointment_time) {
+//         const appointmentDate = new Date(booking.appointment_time);
+//         if (isNaN(appointmentDate.getTime())) {
+//           validationErrors.push({
+//             index,
+//             customer_name: booking.customer_name || 'Unknown',
+//             message: 'Invalid appointment_time format',
+//             provided: booking.appointment_time
+//           });
+//         } else if (appointmentDate < new Date()) {
+//           validationErrors.push({
+//             index,
+//             customer_name: booking.customer_name || 'Unknown',
+//             message: 'Appointment time cannot be in the past',
+//             provided: booking.appointment_time
+//           });
+//         }
+//       }
+      
+//       // Validate pay_now is boolean if provided
+//       if (booking.pay_now !== undefined && typeof booking.pay_now !== 'boolean') {
+//         validationErrors.push({
+//           index,
+//           customer_name: booking.customer_name || 'Unknown',
+//           message: 'pay_now must be a boolean value (true or false)',
+//           provided: booking.pay_now
+//         });
+//       }
+
+//       // Validate email format if provided
+//       if (booking.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(booking.email)) {
+//         validationErrors.push({
+//           index,
+//           customer_name: booking.customer_name || 'Unknown',
+//           message: 'Invalid email format',
+//           provided: booking.email
+//         });
+//       }
+//     });
+
+//     if (validationErrors.length > 0) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `Validation failed for ${validationErrors.length} booking(s)`,
+//         errors: validationErrors,
+//         total_requests: bookingsData.length
+//       });
+//     }
+
+//     // Process bookings
+//     const results = [];
+//     const conflicts = [];
+//     const emailResults = [];
+
+//     for (let i = 0; i < bookingsData.length; i++) {
+//       const { 
+//         customer_name, 
+//         phone_number, 
+//         email, 
+//         appointment_time,
+//         pay_now = false
+//       } = bookingsData[i];
+
+//       const appointmentDate = new Date(appointment_time);
+
+//       // Extract date and time for comparison
+//       const startOfSlot = new Date(appointmentDate);
+//       startOfSlot.setSeconds(0, 0);
+
+//       const endOfSlot = new Date(startOfSlot);
+//       endOfSlot.setMinutes(endOfSlot.getMinutes() + 59);
+//       endOfSlot.setSeconds(59, 999);
+
+//       // Check availability
+//       const existingBooking = await Booking.findOne({
+//         appointment_time: {
+//           $gte: startOfSlot,
+//           $lte: endOfSlot
+//         },
+//         status: { $ne: 'cancelled' }
+//       });
+
+//       if (existingBooking) {
+//         // Format the time slot for better readability
+//         const formattedTime = appointmentDate.toLocaleString('en-US', {
+//           weekday: 'short',
+//           year: 'numeric',
+//           month: 'short',
+//           day: 'numeric',
+//           hour: '2-digit',
+//           minute: '2-digit',
+//           hour12: true
+//         });
+
+//         conflicts.push({
+//           index: i,
+//           customer_name,
+//           phone_number,
+//           email: email || null,
+//           requested_time: appointment_time,
+//           formatted_time: formattedTime,
+//           message: 'This time slot is already booked',
+//           booked_by: {
+//             name: existingBooking.customer_name,
+//             booking_id: existingBooking._id
+//           },
+//           suggestion: 'Please select a different time slot or contact us for availability'
+//         });
+//         continue;
+//       }
+
+//       // Create booking with payment status based on pay_now
+//       const booking = new Booking({
+//         customer_name,
+//         phone_number,
+//         email: email || null,
+//         appointment_time: appointmentDate,
+//         status: 'pending',
+//         payment_status: pay_now ? 'paid' : 'unpaid'
+//       });
+
+//       await booking.save();
+
+//       // Send customer confirmation email
+//       const emailResult = await sendConfirmationEmail({
+//         id: booking._id,
+//         customer_name: booking.customer_name,
+//         phone_number: booking.phone_number,
+//         email: booking.email,
+//         appointment_time: booking.appointment_time,
+//         payment_status: booking.payment_status
+//       });
+
+//       emailResults.push({
+//         booking_id: booking._id,
+//         email: booking.email,
+//         ...emailResult
+//       });
+
+//       results.push({
+//         id: booking._id,
+//         customer_name: booking.customer_name,
+//         phone_number: booking.phone_number,
+//         email: booking.email,
+//         appointment_time: booking.appointment_time,
+//         status: booking.status,
+//         payment_status: booking.payment_status,
+//         pay_now,
+//         email_sent: emailResult.sent
+//       });
+//     }
+
+//     // Send admin notification if any bookings were successful
+//     let adminEmailResult = { sent: false };
+//     if (results.length > 0) {
+//       adminEmailResult = await sendAdminNotificationEmail(results);
+//     }
+
+//     // Handle different response scenarios
+    
+//     // Scenario 1: All bookings failed due to conflicts
+//     if (conflicts.length > 0 && results.length === 0) {
+//       return res.status(409).json({
+//         success: false,
+//         message: isBulkBooking 
+//           ? `All ${conflicts.length} time slot(s) are unavailable` 
+//           : 'The requested time slot is already booked',
+//         conflicts,
+//         suggestion: 'Please choose different time slot(s) and try again',
+//         total_requests: bookingsData.length,
+//         failed: conflicts.length
+//       });
+//     }
+
+//     // Scenario 2: Partial success (some bookings succeeded, some failed)
+//     if (isBulkBooking && conflicts.length > 0 && results.length > 0) {
+//       return res.status(207).json({
+//         success: true,
+//         message: `Partial success: ${results.length} booking(s) created, ${conflicts.length} failed`,
+//         bookings: results,
+//         conflicts,
+//         summary: {
+//           total: bookingsData.length,
+//           successful: results.length,
+//           failed: conflicts.length,
+//           emails_sent: emailResults.filter(e => e.sent).length,
+//           emails_failed: emailResults.filter(e => !e.sent).length,
+//           admin_notified: adminEmailResult.sent
+//         }
+//       });
+//     }
+
+//     // Scenario 3: Complete success (bulk)
+//     if (isBulkBooking) {
+//       return res.status(201).json({
+//         success: true,
+//         message: `Successfully created ${results.length} booking(s)`,
+//         bookings: results,
+//         summary: {
+//           total: bookingsData.length,
+//           successful: results.length,
+//           failed: 0,
+//           emails_sent: emailResults.filter(e => e.sent).length,
+//           emails_failed: emailResults.filter(e => !e.sent).length,
+//           admin_notified: adminEmailResult.sent
+//         }
+//       });
+//     }
+
+//     // Scenario 4: Complete success (single booking)
+//     // FIXED: Admin notification is now sent before this response
+//     return res.status(201).json({
+//       success: true,
+//       message: 'Booking created successfully',
+//       booking: results[0],
+//       email_sent: emailResults[0]?.sent || false,
+//       admin_notified: adminEmailResult.sent
+//     });
+
+//   } catch (error) {
+//     console.error('Error creating booking:', error);
+    
+//     // Handle specific error types
+//     if (error.name === 'ValidationError') {
+//       return res.status(400).json({ 
+//         success: false, 
+//         message: 'Database validation error',
+//         details: error.message
+//       });
+//     }
+
+//     if (error.name === 'MongoError' && error.code === 11000) {
+//       return res.status(409).json({ 
+//         success: false, 
+//         message: 'Duplicate booking detected',
+//         details: 'A booking with this information already exists'
+//       });
+//     }
+
+//     // Generic error response
+//     res.status(500).json({ 
+//       success: false, 
+//       message: 'An unexpected error occurred while processing your booking',
+//       error: process.env.NODE_ENV === 'development' ? error.message : undefined
+//     });
+//   }
+// });
+
+// ================= OPTIMIZED BOOKINGS ENDPOINT =================
+
+// Helper function to normalize appointment times to 30-minute slot boundaries
+const normalizeToSlotStart = (date) => {
+  const normalized = new Date(date);
+  normalized.setSeconds(0, 0);
+  // Round down to nearest 30-minute slot (0 or 30 minutes)
+  normalized.setMinutes(Math.floor(normalized.getMinutes() / 30) * 30);
+  return normalized;
+};
+
 app.post('/bookings', async (req, res) => {
   try {
-    // Check if it's a bulk booking request
     const isBulkBooking = Array.isArray(req.body);
     const bookingsData = isBulkBooking ? req.body : [req.body];
 
-    // Validate all bookings first
+    // ============= STEP 1: FAST VALIDATION =============
     const validationErrors = [];
-    bookingsData.forEach((booking, index) => {
-      if (!booking.customer_name || !booking.phone_number || !booking.appointment_time) {
+    const validBookings = [];
+    
+    for (let i = 0; i < bookingsData.length; i++) {
+      const booking = bookingsData[i];
+      const errors = [];
+
+      // Required fields check
+      if (!booking.customer_name) errors.push('customer_name');
+      if (!booking.phone_number) errors.push('phone_number');
+      if (!booking.appointment_time) errors.push('appointment_time');
+
+      if (errors.length > 0) {
         validationErrors.push({
-          index,
+          index: i,
           customer_name: booking.customer_name || 'Unknown',
           message: 'Missing required fields',
-          missing_fields: [
-            !booking.customer_name && 'customer_name',
-            !booking.phone_number && 'phone_number',
-            !booking.appointment_time && 'appointment_time'
-          ].filter(Boolean)
+          missing_fields: errors
         });
+        continue;
       }
-      
-      // Validate appointment_time format
-      if (booking.appointment_time) {
-        const appointmentDate = new Date(booking.appointment_time);
-        if (isNaN(appointmentDate.getTime())) {
-          validationErrors.push({
-            index,
-            customer_name: booking.customer_name || 'Unknown',
-            message: 'Invalid appointment_time format',
-            provided: booking.appointment_time
-          });
-        } else if (appointmentDate < new Date()) {
-          validationErrors.push({
-            index,
-            customer_name: booking.customer_name || 'Unknown',
-            message: 'Appointment time cannot be in the past',
-            provided: booking.appointment_time
-          });
-        }
+
+      // Validate appointment time
+      const appointmentDate = new Date(booking.appointment_time);
+      if (isNaN(appointmentDate.getTime())) {
+        validationErrors.push({
+          index: i,
+          customer_name: booking.customer_name,
+          message: 'Invalid appointment_time format',
+          provided: booking.appointment_time
+        });
+        continue;
       }
-      
-      // Validate pay_now is boolean if provided
+
+      // Check if appointment is in the past
+      if (appointmentDate < new Date()) {
+        validationErrors.push({
+          index: i,
+          customer_name: booking.customer_name,
+          message: 'Appointment time cannot be in the past',
+          provided: booking.appointment_time
+        });
+        continue;
+      }
+
+      // Validate pay_now boolean
       if (booking.pay_now !== undefined && typeof booking.pay_now !== 'boolean') {
         validationErrors.push({
-          index,
-          customer_name: booking.customer_name || 'Unknown',
+          index: i,
+          customer_name: booking.customer_name,
           message: 'pay_now must be a boolean value (true or false)',
           provided: booking.pay_now
         });
+        continue;
       }
 
-      // Validate email format if provided
+      // Validate email format
       if (booking.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(booking.email)) {
         validationErrors.push({
-          index,
-          customer_name: booking.customer_name || 'Unknown',
+          index: i,
+          customer_name: booking.customer_name,
           message: 'Invalid email format',
           provided: booking.email
         });
+        continue;
       }
-    });
 
-    if (validationErrors.length > 0) {
+      // Add to valid bookings
+      validBookings.push({ ...booking, index: i, appointmentDate });
+    }
+
+    // If all bookings failed validation, return early
+    if (validationErrors.length === bookingsData.length) {
       return res.status(400).json({
         success: false,
-        message: `Validation failed for ${validationErrors.length} booking(s)`,
+        message: `Validation failed for all ${validationErrors.length} booking(s)`,
         errors: validationErrors,
         total_requests: bookingsData.length
       });
     }
 
-    // Process bookings
-    const results = [];
+    // ============= STEP 2: BATCH CONFLICT CHECK (SINGLE QUERY) =============
+    // Normalize all times to 30-minute boundaries and group duplicates
+    const timeSlotMap = new Map();
+    
+    validBookings.forEach(booking => {
+      const normalizedTime = normalizeToSlotStart(booking.appointmentDate);
+      const timeKey = normalizedTime.getTime();
+      
+      if (!timeSlotMap.has(timeKey)) {
+        timeSlotMap.set(timeKey, []);
+      }
+      timeSlotMap.get(timeKey).push(booking);
+    });
+
+    // Get all unique time slots to check
+    const timeSlots = Array.from(timeSlotMap.keys()).map(t => new Date(t));
+    
+    // SINGLE DATABASE QUERY - Check all time slots at once
+    const existingBookings = await Booking.find({
+      appointment_time: { $in: timeSlots },
+      status: { $ne: 'cancelled' }
+    }).lean(); // .lean() for faster queries (returns plain JS objects)
+
+    // Create Set of already booked time slots for O(1) lookup
+    const bookedTimeSlots = new Set(
+      existingBookings.map(b => new Date(b.appointment_time).getTime())
+    );
+
+    // ============= STEP 3: SEPARATE CONFLICTS FROM VALID BOOKINGS =============
     const conflicts = [];
-    const emailResults = [];
+    const bookingsToCreate = [];
 
-    for (let i = 0; i < bookingsData.length; i++) {
-      const { 
-        customer_name, 
-        phone_number, 
-        email, 
-        appointment_time,
-        pay_now = false
-      } = bookingsData[i];
+    validBookings.forEach(booking => {
+      const normalizedTime = normalizeToSlotStart(booking.appointmentDate);
+      const timeKey = normalizedTime.getTime();
 
-      const appointmentDate = new Date(appointment_time);
-
-      // Extract date and time for comparison
-      const startOfSlot = new Date(appointmentDate);
-      startOfSlot.setSeconds(0, 0);
-
-      const endOfSlot = new Date(startOfSlot);
-      endOfSlot.setMinutes(endOfSlot.getMinutes() + 59);
-      endOfSlot.setSeconds(59, 999);
-
-      // Check availability
-      const existingBooking = await Booking.findOne({
-        appointment_time: {
-          $gte: startOfSlot,
-          $lte: endOfSlot
-        },
-        status: { $ne: 'cancelled' }
-      });
-
-      if (existingBooking) {
-        // Format the time slot for better readability
-        const formattedTime = appointmentDate.toLocaleString('en-US', {
+      if (bookedTimeSlots.has(timeKey)) {
+        // Slot is already booked - add to conflicts
+        const formattedTime = booking.appointmentDate.toLocaleString('en-US', {
           weekday: 'short',
           year: 'numeric',
           month: 'short',
@@ -1514,104 +1814,120 @@ app.post('/bookings', async (req, res) => {
         });
 
         conflicts.push({
-          index: i,
-          customer_name,
-          phone_number,
-          email: email || null,
-          requested_time: appointment_time,
+          index: booking.index,
+          customer_name: booking.customer_name,
+          phone_number: booking.phone_number,
+          email: booking.email || null,
+          requested_time: booking.appointment_time,
           formatted_time: formattedTime,
           message: 'This time slot is already booked',
-          booked_by: {
-            name: existingBooking.customer_name,
-            booking_id: existingBooking._id
-          },
           suggestion: 'Please select a different time slot or contact us for availability'
         });
-        continue;
+      } else {
+        // Slot is available - prepare for insert
+        bookingsToCreate.push({
+          customer_name: booking.customer_name,
+          phone_number: booking.phone_number,
+          email: booking.email || null,
+          appointment_time: normalizedTime,
+          status: 'pending',
+          payment_status: booking.pay_now ? 'paid' : 'unpaid',
+          originalIndex: booking.index,
+          pay_now: booking.pay_now || false
+        });
+        
+        // Mark this slot as booked to prevent duplicates within same request
+        bookedTimeSlots.add(timeKey);
       }
+    });
 
-      // Create booking with payment status based on pay_now
-      const booking = new Booking({
-        customer_name,
-        phone_number,
-        email: email || null,
-        appointment_time: appointmentDate,
-        status: 'pending',
-        payment_status: pay_now ? 'paid' : 'unpaid'
-      });
-
-      await booking.save();
-
-      // Send customer confirmation email
-      const emailResult = await sendConfirmationEmail({
-        id: booking._id,
-        customer_name: booking.customer_name,
-        phone_number: booking.phone_number,
-        email: booking.email,
-        appointment_time: booking.appointment_time,
-        payment_status: booking.payment_status
-      });
-
-      emailResults.push({
-        booking_id: booking._id,
-        email: booking.email,
-        ...emailResult
-      });
-
-      results.push({
-        id: booking._id,
-        customer_name: booking.customer_name,
-        phone_number: booking.phone_number,
-        email: booking.email,
-        appointment_time: booking.appointment_time,
-        status: booking.status,
-        payment_status: booking.payment_status,
-        pay_now,
-        email_sent: emailResult.sent
-      });
-    }
-
-    // Send admin notification if any bookings were successful
-    let adminEmailResult = { sent: false };
-    if (results.length > 0) {
-      adminEmailResult = await sendAdminNotificationEmail(results);
-    }
-
-    // Handle different response scenarios
-    
-    // Scenario 1: All bookings failed due to conflicts
-    if (conflicts.length > 0 && results.length === 0) {
+    // ============= STEP 4: HANDLE ALL CONFLICTS CASE =============
+    if (bookingsToCreate.length === 0) {
+      const allErrors = [...validationErrors, ...conflicts];
       return res.status(409).json({
         success: false,
         message: isBulkBooking 
-          ? `All ${conflicts.length} time slot(s) are unavailable` 
+          ? `All ${allErrors.length} time slot(s) are unavailable` 
           : 'The requested time slot is already booked',
-        conflicts,
+        conflicts: allErrors,
         suggestion: 'Please choose different time slot(s) and try again',
         total_requests: bookingsData.length,
-        failed: conflicts.length
+        failed: allErrors.length
       });
     }
 
-    // Scenario 2: Partial success (some bookings succeeded, some failed)
-    if (isBulkBooking && conflicts.length > 0 && results.length > 0) {
+    // ============= STEP 5: BULK INSERT ALL BOOKINGS =============
+    const createdBookings = await Booking.insertMany(bookingsToCreate, { 
+      ordered: false // Continue inserting even if some fail
+    });
+
+    // Prepare results
+    const results = createdBookings.map(booking => ({
+      id: booking._id,
+      customer_name: booking.customer_name,
+      phone_number: booking.phone_number,
+      email: booking.email,
+      appointment_time: booking.appointment_time,
+      status: booking.status,
+      payment_status: booking.payment_status
+    }));
+
+    // ============= STEP 6: SEND EMAILS ASYNCHRONOUSLY =============
+    // Don't wait for emails - send response immediately
+    setImmediate(async () => {
+      try {
+        // Send customer confirmation emails in parallel
+        const customerEmailPromises = createdBookings
+          .filter(b => b.email)
+          .map(booking => 
+            sendConfirmationEmail({
+              id: booking._id,
+              customer_name: booking.customer_name,
+              phone_number: booking.phone_number,
+              email: booking.email,
+              appointment_time: booking.appointment_time,
+              payment_status: booking.payment_status
+            }).catch(err => {
+              console.error(`Customer email failed for ${booking.email}:`, err.message);
+              return { sent: false, error: err.message };
+            })
+          );
+
+        // Send admin notification email
+        const adminEmailPromise = sendAdminNotificationEmail(results).catch(err => {
+          console.error('Admin notification failed:', err.message);
+          return { sent: false, error: err.message };
+        });
+
+        // Execute all emails in parallel
+        await Promise.all([...customerEmailPromises, adminEmailPromise]);
+        
+        console.log(`Background emails completed for ${results.length} booking(s)`);
+      } catch (error) {
+        console.error('Background email processing error:', error);
+      }
+    });
+
+    // ============= STEP 7: SEND IMMEDIATE RESPONSE =============
+    const allErrors = [...validationErrors, ...conflicts];
+
+    // Scenario: Partial success
+    if (isBulkBooking && allErrors.length > 0) {
       return res.status(207).json({
         success: true,
-        message: `Partial success: ${results.length} booking(s) created, ${conflicts.length} failed`,
+        message: `Partial success: ${results.length} booking(s) created, ${allErrors.length} failed`,
         bookings: results,
-        conflicts,
+        conflicts: allErrors,
         summary: {
           total: bookingsData.length,
           successful: results.length,
-          failed: conflicts.length,
-          emails_sent: emailResults.filter(e => e.sent).length,
-          emails_failed: emailResults.filter(e => !e.sent).length,
-          admin_notified: adminEmailResult.sent
+          failed: allErrors.length,
+          emails_processing: true
         }
       });
     }
 
-    // Scenario 3: Complete success (bulk)
+    // Scenario: Complete success (bulk)
     if (isBulkBooking) {
       return res.status(201).json({
         success: true,
@@ -1621,27 +1937,24 @@ app.post('/bookings', async (req, res) => {
           total: bookingsData.length,
           successful: results.length,
           failed: 0,
-          emails_sent: emailResults.filter(e => e.sent).length,
-          emails_failed: emailResults.filter(e => !e.sent).length,
-          admin_notified: adminEmailResult.sent
+          emails_processing: true
         }
       });
     }
 
-    // Scenario 4: Complete success (single booking)
-    // FIXED: Admin notification is now sent before this response
+    // Scenario: Complete success (single booking)
     return res.status(201).json({
       success: true,
       message: 'Booking created successfully',
       booking: results[0],
-      email_sent: emailResults[0]?.sent || false,
-      admin_notified: adminEmailResult.sent
+      email_processing: !!results[0].email,
+      admin_notified: true
     });
 
   } catch (error) {
     console.error('Error creating booking:', error);
     
-    // Handle specific error types
+    // Handle specific MongoDB errors
     if (error.name === 'ValidationError') {
       return res.status(400).json({ 
         success: false, 
@@ -1650,7 +1963,7 @@ app.post('/bookings', async (req, res) => {
       });
     }
 
-    if (error.name === 'MongoError' && error.code === 11000) {
+    if (error.code === 11000) {
       return res.status(409).json({ 
         success: false, 
         message: 'Duplicate booking detected',
