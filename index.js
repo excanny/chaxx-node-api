@@ -375,20 +375,56 @@ app.get('/available-slots', async (req, res) => {
 
 
 // Configure Gmail SMTP transporter with environment variables
+// const transporter = nodemailer.createTransport({
+//   service: 'gmail',
+//   auth: {
+//     user: process.env.GMAIL_USER, // Your Gmail address from .env
+//     pass: process.env.GMAIL_APP_PASSWORD // Gmail App Password from .env
+//   }
+// });
+
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587, // Explicit port
+  secure: false, // Use STARTTLS
   auth: {
-    user: process.env.GMAIL_USER, // Your Gmail address from .env
-    pass: process.env.GMAIL_APP_PASSWORD // Gmail App Password from .env
-  }
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD
+  },
+  tls: {
+    rejectUnauthorized: true
+  },
+  // Add connection timeout
+  connectionTimeout: 10000, // 10 seconds
+  greetingTimeout: 5000,
+  socketTimeout: 15000
 });
 
+
 // Verify transporter configuration on startup
+// transporter.verify((error, success) => {
+//   if (error) {
+//     console.error('Email transporter configuration error:', error);
+//   } else {
+//     console.log('Email server is ready to send messages');
+//   }
+// });
+
 transporter.verify((error, success) => {
   if (error) {
-    console.error('Email transporter configuration error:', error);
+    console.error('❌ Email transporter configuration error:', {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      port: error.port || 'unknown'
+    });
+    console.error('🔍 Check these:');
+    console.error('  1. GMAIL_USER is set:', !!process.env.GMAIL_USER);
+    console.error('  2. GMAIL_APP_PASSWORD is set:', !!process.env.GMAIL_APP_PASSWORD);
+    console.error('  3. Environment:', process.env.NODE_ENV || 'development');
   } else {
-    console.log('Email server is ready to send messages');
+    console.log('✅ Email server is ready to send messages');
+    console.log('📧 Sending from:', process.env.GMAIL_USER);
   }
 });
 
@@ -1081,51 +1117,173 @@ const bookingRows = bookings.map(booking => `
   };
 };
 
-// Function to send customer confirmation email
+// // Function to send customer confirmation email
+// const sendConfirmationEmail = async (booking) => {
+//   if (!booking.email) {
+//     console.log(`No email provided for booking ${booking.id}`);
+//     return { sent: false, reason: 'No email provided' };
+//   }
+
+//   const emailContent = createConfirmationEmail(booking);
+
+//   try {
+//     await transporter.sendMail({
+//       from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
+//       to: booking.email,
+//       subject: emailContent.subject,
+//       html: emailContent.html
+//     });
+
+//     console.log(`Confirmation email sent to ${booking.email}`);
+//     return { sent: true };
+//   } catch (error) {
+//     console.error(`Failed to send email to ${booking.email}:`, error);
+//     return { sent: false, error: error.message };
+//   }
+// };
+
+// // Function to send admin notification email
+// const sendAdminNotificationEmail = async (bookings) => {
+//   const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
+//   const emailContent = createAdminNotificationEmail(bookings);
+
+//   try {
+//     await transporter.sendMail({
+//       from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
+//       to: adminEmail,
+//       subject: emailContent.subject,
+//       html: emailContent.html
+//     });
+
+//     console.log(`Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
+//     return { sent: true, email: adminEmail };
+//   } catch (error) {
+//     console.error(`Failed to send admin notification to ${adminEmail}:`, error);
+//     return { sent: false, error: error.message, email: adminEmail };
+//   }
+// };
+
 const sendConfirmationEmail = async (booking) => {
   if (!booking.email) {
-    console.log(`No email provided for booking ${booking.id}`);
+    console.log(`ℹ️ No email provided for booking ${booking.id}`);
     return { sent: false, reason: 'No email provided' };
   }
 
   const emailContent = createConfirmationEmail(booking);
 
   try {
-    await transporter.sendMail({
-      from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
+    console.log(`📤 Sending confirmation email to ${booking.email}...`);
+    
+    const info = await transporter.sendMail({
+      from: `"Chaxx Barbershop" <${process.env.GMAIL_USER}>`,
       to: booking.email,
       subject: emailContent.subject,
       html: emailContent.html
     });
 
-    console.log(`Confirmation email sent to ${booking.email}`);
-    return { sent: true };
+    console.log(`✅ Confirmation email sent to ${booking.email}`);
+    console.log(`   Message ID: ${info.messageId}`);
+    return { sent: true, messageId: info.messageId };
   } catch (error) {
-    console.error(`Failed to send email to ${booking.email}:`, error);
-    return { sent: false, error: error.message };
+    console.error(`❌ Failed to send email to ${booking.email}:`, {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      response: error.response,
+      responseCode: error.responseCode
+    });
+    return { sent: false, error: error.message, code: error.code };
   }
 };
 
-// Function to send admin notification email
 const sendAdminNotificationEmail = async (bookings) => {
   const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
   const emailContent = createAdminNotificationEmail(bookings);
 
   try {
-    await transporter.sendMail({
+    console.log(`📤 Sending admin notification to ${adminEmail}...`);
+    
+    const info = await transporter.sendMail({
       from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
       to: adminEmail,
       subject: emailContent.subject,
       html: emailContent.html
     });
 
-    console.log(`Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
-    return { sent: true, email: adminEmail };
+    console.log(`✅ Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
+    console.log(`   Message ID: ${info.messageId}`);
+    return { sent: true, email: adminEmail, messageId: info.messageId };
   } catch (error) {
-    console.error(`Failed to send admin notification to ${adminEmail}:`, error);
-    return { sent: false, error: error.message, email: adminEmail };
+    console.error(`❌ Failed to send admin notification to ${adminEmail}:`, {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      response: error.response,
+      responseCode: error.responseCode
+    });
+    return { sent: false, error: error.message, code: error.code, email: adminEmail };
   }
 };
+
+// Use this to test email sending directly
+app.get('/test-email', async (req, res) => {
+  const testEmail = req.query.email || process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
+  
+  try {
+    console.log('🧪 Testing email configuration...');
+    
+    // Test 1: Verify transporter
+    await transporter.verify();
+    console.log('✅ Transporter verification passed');
+    
+    // Test 2: Send test email
+    const info = await transporter.sendMail({
+      from: `"Chaxx Barbershop Test" <${process.env.GMAIL_USER}>`,
+      to: testEmail,
+      subject: 'Test Email from Render',
+      html: `
+        <h2>Email Test Successful! 🎉</h2>
+        <p>If you're reading this, emails are working on Render.</p>
+        <p>Timestamp: ${new Date().toISOString()}</p>
+        <p>Environment: ${process.env.NODE_ENV || 'development'}</p>
+        <hr>
+        <small>Sent from Chaxx Barbershop Booking System</small>
+      `
+    });
+    
+    console.log('✅ Test email sent successfully');
+    console.log('   Message ID:', info.messageId);
+    
+    res.json({
+      success: true,
+      message: 'Test email sent successfully',
+      details: {
+        to: testEmail,
+        messageId: info.messageId,
+        from: process.env.GMAIL_USER,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('❌ Email test failed:', error);
+    
+    res.status(500).json({
+      success: false,
+      message: 'Email test failed',
+      error: {
+        message: error.message,
+        code: error.code,
+        command: error.command,
+        response: error.response
+      },
+      troubleshooting: {
+        gmail_user_set: !!process.env.GMAIL_USER,
+        gmail_password_set: !!process.env.GMAIL_APP_PASSWORD,
+        environment: process.env.NODE_ENV || 'development'
+      }
+    });
+  }
+});
 
 // app.post('/bookings', async (req, res) => {
 //   try {
