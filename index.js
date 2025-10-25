@@ -15,9 +15,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // MongoDB configuration
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://excanny:Excannyg*1914@cluster0.rhoaa.mongodb.net/chaxx?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
 //const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/test';
-
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI)
