@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
+const brevo = require('@getbrevo/brevo');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -383,22 +384,22 @@ app.get('/available-slots', async (req, res) => {
 //   }
 // });
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587, // Explicit port
-  secure: false, // Use STARTTLS
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD
-  },
-  tls: {
-    rejectUnauthorized: true
-  },
-  // Add connection timeout
-  connectionTimeout: 10000, // 10 seconds
-  greetingTimeout: 5000,
-  socketTimeout: 15000
-});
+// const transporter = nodemailer.createTransport({
+//   host: 'smtp.gmail.com',
+//   port: 587, // Explicit port
+//   secure: false, // Use STARTTLS
+//   auth: {
+//     user: process.env.GMAIL_USER,
+//     pass: process.env.GMAIL_APP_PASSWORD
+//   },
+//   tls: {
+//     rejectUnauthorized: true
+//   },
+//   // Add connection timeout
+//   connectionTimeout: 10000, // 10 seconds
+//   greetingTimeout: 5000,
+//   socketTimeout: 15000
+// });
 
 
 // Verify transporter configuration on startup
@@ -410,23 +411,155 @@ const transporter = nodemailer.createTransport({
 //   }
 // });
 
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('❌ Email transporter configuration error:', {
-      message: error.message,
-      code: error.code,
-      command: error.command,
-      port: error.port || 'unknown'
-    });
-    console.error('🔍 Check these:');
-    console.error('  1. GMAIL_USER is set:', !!process.env.GMAIL_USER);
-    console.error('  2. GMAIL_APP_PASSWORD is set:', !!process.env.GMAIL_APP_PASSWORD);
-    console.error('  3. Environment:', process.env.NODE_ENV || 'development');
-  } else {
-    console.log('✅ Email server is ready to send messages');
-    console.log('📧 Sending from:', process.env.GMAIL_USER);
+// transporter.verify((error, success) => {
+//   if (error) {
+//     console.error('❌ Email transporter configuration error:', {
+//       message: error.message,
+//       code: error.code,
+//       command: error.command,
+//       port: error.port || 'unknown'
+//     });
+//     console.error('🔍 Check these:');
+//     console.error('  1. GMAIL_USER is set:', !!process.env.GMAIL_USER);
+//     console.error('  2. GMAIL_APP_PASSWORD is set:', !!process.env.GMAIL_APP_PASSWORD);
+//     console.error('  3. Environment:', process.env.NODE_ENV || 'development');
+//   } else {
+//     console.log('✅ Email server is ready to send messages');
+//     console.log('📧 Sending from:', process.env.GMAIL_USER);
+//   }
+// });
+
+// Initialize Brevo API client
+const brevoClient = new brevo.TransactionalEmailsApi();
+const brevoApiKey = brevoClient.authentications['apiKey'];
+brevoApiKey.apiKey = process.env.BREVO_API_KEY;
+
+// Verify configuration on startup
+if (process.env.BREVO_API_KEY) {
+  console.log('✅ Brevo API configured successfully');
+  console.log('📧 Sending from:', process.env.BREVO_FROM_EMAIL);
+} else {
+  console.warn('⚠️ BREVO_API_KEY not set - emails will fail');
+}
+
+// Customer confirmation email
+const sendConfirmationEmail = async (booking) => {
+  if (!booking.email) {
+    console.log(`ℹ️ No email provided for booking ${booking.id}`);
+    return { sent: false, reason: 'No email provided' };
   }
-});
+
+  if (!process.env.BREVO_API_KEY) {
+    console.error('❌ BREVO_API_KEY not configured');
+    return { sent: false, reason: 'Brevo not configured' };
+  }
+
+  const emailContent = createConfirmationEmail(booking);
+
+  try {
+    console.log(`📤 Sending confirmation email via Brevo to ${booking.email}...`);
+    
+    const sendSmtpEmail = new brevo.SendSmtpEmail();
+    sendSmtpEmail.subject = emailContent.subject;
+    sendSmtpEmail.htmlContent = emailContent.html;
+    sendSmtpEmail.sender = {
+      name: "Chaxx Barbershop",
+      email: process.env.BREVO_FROM_EMAIL
+    };
+    sendSmtpEmail.to = [{ 
+      email: booking.email, 
+      name: booking.customer_name 
+    }];
+
+    const response = await brevoClient.sendTransacEmail(sendSmtpEmail);
+    
+    if (response && response.messageId) {
+      console.log(`✅ Confirmation email sent to ${booking.email}`);
+      console.log(`   Message ID: ${response.messageId}`);
+      
+      return { 
+        sent: true, 
+        messageId: response.messageId,
+        to: booking.email
+      };
+    } else {
+      console.warn(`⚠️ Unexpected Brevo response:`, response);
+      return {
+        sent: false,
+        reason: 'Unexpected response format',
+        response
+      };
+    }
+  } catch (error) {
+    console.error(`❌ Failed to send email to ${booking.email}:`, {
+      message: error.message,
+      body: error.body || 'N/A'
+    });
+    
+    return { 
+      sent: false, 
+      error: error.message,
+      to: booking.email
+    };
+  }
+};
+
+// Admin notification email
+const sendAdminNotificationEmail = async (bookings) => {
+  const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
+  
+  if (!process.env.BREVO_API_KEY) {
+    console.error('❌ BREVO_API_KEY not configured');
+    return { sent: false, reason: 'Brevo not configured', email: adminEmail };
+  }
+
+  const emailContent = createAdminNotificationEmail(bookings);
+
+  try {
+    console.log(`📤 Sending admin notification via Brevo to ${adminEmail}...`);
+    
+    const sendSmtpEmail = new brevo.SendSmtpEmail();
+    sendSmtpEmail.subject = emailContent.subject;
+    sendSmtpEmail.htmlContent = emailContent.html;
+    sendSmtpEmail.sender = {
+      name: "Chaxx Barbershop Bookings",
+      email: process.env.BREVO_FROM_EMAIL
+    };
+    sendSmtpEmail.to = [{ email: adminEmail }];
+
+    const response = await brevoClient.sendTransacEmail(sendSmtpEmail);
+    
+    if (response && response.messageId) {
+      console.log(`✅ Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
+      console.log(`   Message ID: ${response.messageId}`);
+      
+      return { 
+        sent: true, 
+        email: adminEmail, 
+        messageId: response.messageId
+      };
+    } else {
+      console.warn(`⚠️ Unexpected Brevo response:`, response);
+      return {
+        sent: false,
+        reason: 'Unexpected response format',
+        email: adminEmail,
+        response
+      };
+    }
+  } catch (error) {
+    console.error(`❌ Failed to send admin notification to ${adminEmail}:`, {
+      message: error.message,
+      body: error.body || 'N/A'
+    });
+    
+    return { 
+      sent: false, 
+      error: error.message,
+      email: adminEmail
+    };
+  }
+};
 
 // Email template function for customer
 const createConfirmationEmail = (booking) => {
@@ -440,7 +573,7 @@ const createConfirmationEmail = (booking) => {
   });
 
   return {
-    subject: 'Booking Confirmation',
+    subject: 'Booking Confirmation - Chaxx Barbershop',
     html: `
   <!DOCTYPE html>
   <html>
@@ -484,29 +617,6 @@ const createConfirmationEmail = (booking) => {
         position: relative;
         overflow: hidden;
       }
-      .confetti {
-        position: absolute;
-        width: 100%;
-        height: 100%;
-        top: 0;
-        left: 0;
-        pointer-events: none;
-      }
-      .confetti span {
-        position: absolute;
-        font-size: 24px;
-        animation: fall 3s linear infinite;
-      }
-      .confetti span:nth-child(1) { left: 10%; animation-delay: 0s; }
-      .confetti span:nth-child(2) { left: 25%; animation-delay: 0.5s; }
-      .confetti span:nth-child(3) { left: 40%; animation-delay: 1s; }
-      .confetti span:nth-child(4) { left: 55%; animation-delay: 1.5s; }
-      .confetti span:nth-child(5) { left: 70%; animation-delay: 2s; }
-      .confetti span:nth-child(6) { left: 85%; animation-delay: 2.5s; }
-      @keyframes fall {
-        0% { top: -10%; transform: rotate(0deg); }
-        100% { top: 110%; transform: rotate(360deg); }
-      }
       .party-icon {
         font-size: 80px;
         margin-bottom: 10px;
@@ -525,16 +635,12 @@ const createConfirmationEmail = (booking) => {
         text-transform: uppercase;
         letter-spacing: 2px;
         text-shadow: 3px 3px 0px #fef3c7;
-        position: relative;
-        z-index: 1;
       }
       .header p {
         margin: 15px 0 0 0;
         font-size: 20px;
         color: #92400e;
         font-weight: 700;
-        position: relative;
-        z-index: 1;
       }
       .content { 
         padding: 40px 35px;
@@ -575,15 +681,7 @@ const createConfirmationEmail = (booking) => {
         margin: 25px 0;
         border: 5px solid #7c3aed;
         box-shadow: 8px 8px 0px #a78bfa;
-        position: relative;
       }
-      .sticker {
-        position: absolute;
-        font-size: 50px;
-        transform: rotate(15deg);
-      }
-      .sticker-1 { top: -20px; right: -15px; }
-      .sticker-2 { bottom: -20px; left: -15px; transform: rotate(-20deg); }
       .detail-item { 
         display: flex;
         align-items: center;
@@ -653,30 +751,6 @@ const createConfirmationEmail = (booking) => {
         border-radius: 8px;
         border: 2px solid #fbbf24;
       }
-      .action-section {
-        text-align: center;
-        margin: 40px 0;
-      }
-      .button {
-        display: inline-block;
-        background: linear-gradient(135deg, #ec4899 0%, #db2777 100%);
-        color: #ffffff;
-        padding: 18px 45px;
-        text-decoration: none;
-        border-radius: 50px;
-        font-weight: 900;
-        font-size: 18px;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        box-shadow: 6px 6px 0px #be185d;
-        border: 4px solid #ffffff;
-        transition: transform 0.2s;
-        animation: pulse 2s ease-in-out infinite;
-      }
-      @keyframes pulse {
-        0%, 100% { transform: scale(1); }
-        50% { transform: scale(1.05); }
-      }
       .speech-bubble {
         background-color: #fef3c7;
         border: 4px solid #fbbf24;
@@ -740,6 +814,7 @@ const createConfirmationEmail = (booking) => {
       <div class="container">
         <div class="container-inner">
           <div class="header">
+            <div class="party-icon">🎉</div>
             <h1>✂️ YOU'RE IN!</h1>
             <p>Your Booking is Confirmed 🎉</p>
           </div>
@@ -799,7 +874,6 @@ const createConfirmationEmail = (booking) => {
               <p>💡 Pro Tip: Come 5 mins early and you'll be our favorite person! 😎</p>
             </div>
 
-
             <p style="text-align: center; color: #6b7280; font-size: 15px; margin-top: 30px; font-weight: 700;">
               Questions? We're here! Give us a shout anytime! 📞💬
             </p>
@@ -809,9 +883,9 @@ const createConfirmationEmail = (booking) => {
             <div class="footer-brand">✂️ CHAXX BARBERSHOP ✂️</div>
             <p class="footer-text">Where Every Cut is a Masterpiece! 🎨</p>
             <p class="footer-text">📍 5649 Prefontaine Avenue, Regina SK</p>
-            <p class="footer-text">📞 +1 (306) 216-7657, +1 (306) 550-6583 | ✉️ <span style="color: #fff;">hello@chaxxbarbershop.com</span></p>
+            <p class="footer-text">📞 +1 (306) 216-7657, +1 (306) 550-6583</p>
             <p class="footer-text" style="margin-top: 20px; font-size: 12px; opacity: 0.9;">
-              Spreading good vibes, one cut at a time.! 🎉
+              Spreading good vibes, one cut at a time! 🎉
             </p>
           </div>
         </div>
@@ -827,26 +901,26 @@ const createConfirmationEmail = (booking) => {
 const createAdminNotificationEmail = (bookings) => {
   const isBulk = bookings.length > 1;
   
-const bookingRows = bookings.map(booking => `
-  <tr>
-    <td><strong>${booking.customer_name}</strong></td>
-    <td>${booking.phone_number}</td>
-    <td>${booking.email}</td>
-    <td>${new Date(booking.appointment_time).toLocaleString('en-US', { 
-      month: 'short', 
-      day: 'numeric', 
-      year: 'numeric',
-      hour: '2-digit', 
-      minute: '2-digit'
-    })}</td>
-    <td><span class="badge badge-${booking.payment_status}">${booking.payment_status}</span></td>
-    <td><span class="booking-id">${booking.id}</span></td>
-  </tr>
-`).join('');
+  const bookingRows = bookings.map(booking => `
+    <tr>
+      <td><strong>${booking.customer_name}</strong></td>
+      <td>${booking.phone_number}</td>
+      <td>${booking.email || 'N/A'}</td>
+      <td>${new Date(booking.appointment_time).toLocaleString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric',
+        hour: '2-digit', 
+        minute: '2-digit'
+      })}</td>
+      <td><span class="badge badge-${booking.payment_status}">${booking.payment_status}</span></td>
+      <td><span class="booking-id">${booking.id}</span></td>
+    </tr>
+  `).join('');
 
   return {
-    subject: isBulk ? `New Bulk Booking: ${bookings.length} Appointments` : 'New Booking Received',
-  html: `
+    subject: isBulk ? `New Bulk Booking: ${bookings.length} Appointments` : 'New Booking Received - Chaxx Barbershop',
+    html: `
   <!DOCTYPE html>
   <html>
   <head>
@@ -1044,7 +1118,6 @@ const bookingRows = bookings.map(booking => `
         font-weight: 500;
         margin-top: 10px;
       }
-        .text-white { color: white; }
     </style>
   </head>
   <body>
@@ -1070,7 +1143,7 @@ const bookingRows = bookings.map(booking => `
             </div>
             <div class="stat-card unpaid">
               <p class="stat-number">${bookings.filter(b => b.payment_status === 'unpaid').length}</p>
-              <p class="stat-label">Unpaid</p>
+              <p class="stat-labelRetryClaude does not have the ability to run the code it generates yet.GContinuejavascript              <p class="stat-label">Unpaid</p>
             </div>
           </div>
           
@@ -1117,173 +1190,156 @@ const bookingRows = bookings.map(booking => `
   };
 };
 
-// // Function to send customer confirmation email
-// const sendConfirmationEmail = async (booking) => {
-//   if (!booking.email) {
-//     console.log(`No email provided for booking ${booking.id}`);
-//     return { sent: false, reason: 'No email provided' };
-//   }
-
-//   const emailContent = createConfirmationEmail(booking);
-
-//   try {
-//     await transporter.sendMail({
-//       from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
-//       to: booking.email,
-//       subject: emailContent.subject,
-//       html: emailContent.html
-//     });
-
-//     console.log(`Confirmation email sent to ${booking.email}`);
-//     return { sent: true };
-//   } catch (error) {
-//     console.error(`Failed to send email to ${booking.email}:`, error);
-//     return { sent: false, error: error.message };
-//   }
-// };
-
-// // Function to send admin notification email
-// const sendAdminNotificationEmail = async (bookings) => {
-//   const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
-//   const emailContent = createAdminNotificationEmail(bookings);
-
-//   try {
-//     await transporter.sendMail({
-//       from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
-//       to: adminEmail,
-//       subject: emailContent.subject,
-//       html: emailContent.html
-//     });
-
-//     console.log(`Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
-//     return { sent: true, email: adminEmail };
-//   } catch (error) {
-//     console.error(`Failed to send admin notification to ${adminEmail}:`, error);
-//     return { sent: false, error: error.message, email: adminEmail };
-//   }
-// };
-
-const sendConfirmationEmail = async (booking) => {
-  if (!booking.email) {
-    console.log(`ℹ️ No email provided for booking ${booking.id}`);
-    return { sent: false, reason: 'No email provided' };
-  }
-
-  const emailContent = createConfirmationEmail(booking);
-
-  try {
-    console.log(`📤 Sending confirmation email to ${booking.email}...`);
-    
-    const info = await transporter.sendMail({
-      from: `"Chaxx Barbershop" <${process.env.GMAIL_USER}>`,
-      to: booking.email,
-      subject: emailContent.subject,
-      html: emailContent.html
-    });
-
-    console.log(`✅ Confirmation email sent to ${booking.email}`);
-    console.log(`   Message ID: ${info.messageId}`);
-    return { sent: true, messageId: info.messageId };
-  } catch (error) {
-    console.error(`❌ Failed to send email to ${booking.email}:`, {
-      message: error.message,
-      code: error.code,
-      command: error.command,
-      response: error.response,
-      responseCode: error.responseCode
-    });
-    return { sent: false, error: error.message, code: error.code };
-  }
-};
-
-const sendAdminNotificationEmail = async (bookings) => {
-  const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
-  const emailContent = createAdminNotificationEmail(bookings);
-
-  try {
-    console.log(`📤 Sending admin notification to ${adminEmail}...`);
-    
-    const info = await transporter.sendMail({
-      from: `"Chaxx Barbershop Booking System" <${process.env.GMAIL_USER}>`,
-      to: adminEmail,
-      subject: emailContent.subject,
-      html: emailContent.html
-    });
-
-    console.log(`✅ Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
-    console.log(`   Message ID: ${info.messageId}`);
-    return { sent: true, email: adminEmail, messageId: info.messageId };
-  } catch (error) {
-    console.error(`❌ Failed to send admin notification to ${adminEmail}:`, {
-      message: error.message,
-      code: error.code,
-      command: error.command,
-      response: error.response,
-      responseCode: error.responseCode
-    });
-    return { sent: false, error: error.message, code: error.code, email: adminEmail };
-  }
-};
-
-// Use this to test email sending directly
+// Test email endpoint
 app.get('/test-email', async (req, res) => {
   const testEmail = req.query.email || process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
   
-  try {
-    console.log('🧪 Testing email configuration...');
-    
-    // Test 1: Verify transporter
-    await transporter.verify();
-    console.log('✅ Transporter verification passed');
-    
-    // Test 2: Send test email
-    const info = await transporter.sendMail({
-      from: `"Chaxx Barbershop Test" <${process.env.GMAIL_USER}>`,
-      to: testEmail,
-      subject: 'Test Email from Render',
-      html: `
-        <h2>Email Test Successful! 🎉</h2>
-        <p>If you're reading this, emails are working on Render.</p>
-        <p>Timestamp: ${new Date().toISOString()}</p>
-        <p>Environment: ${process.env.NODE_ENV || 'development'}</p>
-        <hr>
-        <small>Sent from Chaxx Barbershop Booking System</small>
-      `
+  if (!process.env.BREVO_API_KEY) {
+    return res.status(500).json({
+      success: false,
+      message: 'BREVO_API_KEY not configured',
+      instructions: [
+        '1. Sign up at https://www.brevo.com (free, no credit card)',
+        '2. Go to https://app.brevo.com/settings/keys/api',
+        '3. Click "Create a new API key"',
+        '4. Copy the key (starts with xkeysib-)',
+        '5. Add BREVO_API_KEY to your environment variables',
+        '6. Optional: Add BREVO_FROM_EMAIL and ADMIN_EMAIL'
+      ]
     });
+  }
+  
+  try {
+    console.log('🧪 Testing Brevo email configuration...');
+    console.log('   API Key:', process.env.BREVO_API_KEY?.substring(0, 15) + '...');
+    console.log('   From:', process.env.BREVO_FROM_EMAIL);
+    console.log('   To:', testEmail);
     
-    console.log('✅ Test email sent successfully');
-    console.log('   Message ID:', info.messageId);
+    const sendSmtpEmail = new brevo.SendSmtpEmail();
+    sendSmtpEmail.subject = '✅ Brevo Email Working - Chaxx Barbershop!';
+    sendSmtpEmail.htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: -apple-system, sans-serif; margin: 0; padding: 0; background: #f4f4f5; }
+          .container { max-width: 600px; margin: 40px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+          .header { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: white; padding: 40px; text-align: center; }
+          .header h1 { margin: 0; font-size: 32px; }
+          .content { padding: 40px; }
+          .success { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border-left: 4px solid #10b981; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .info { background: #f9fafb; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb; margin: 20px 0; }
+          .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #e5e7eb; }
+          .info-row:last-child { border-bottom: none; }
+          .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; color: #6b7280; }
+          .badge { display: inline-block; padding: 6px 12px; background: #dbeafe; color: #1e40af; border-radius: 6px; font-size: 12px; font-weight: 600; margin-top: 10px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎉 Email System Active!</h1>
+            <p>Your Brevo integration is working perfectly</p>
+          </div>
+          <div class="content">
+            <div class="success">
+              <strong style="color: #065f46; font-size: 18px;">✅ Success!</strong>
+              <p style="color: #047857; margin: 8px 0 0 0;">Your email system is fully operational. All booking confirmations will be delivered successfully to any email address!</p>
+            </div>
+            <div class="info">
+              <h3 style="margin: 0 0 12px 0; color: #1f2937;">📋 Test Details</h3>
+              <div class="info-row">
+                <span>Recipient:</span>
+                <strong>${testEmail}</strong>
+              </div>
+              <div class="info-row">
+                <span>Service:</span>
+                <strong>Brevo (Sendinblue)</strong>
+              </div>
+              <div class="info-row">
+                <span>Daily Limit:</span>
+                <strong>300 emails (FREE)</strong>
+              </div>
+              <div class="info-row">
+                <span>Timestamp:</span>
+                <strong>${new Date().toLocaleString()}</strong>
+              </div>
+            </div>
+            <div style="text-align: center;">
+              <div class="badge">✂️ Chaxx Barbershop Ready to Book</div>
+            </div>
+          </div>
+          <div class="footer">
+            <p><strong>Chaxx Barbershop Booking System</strong></p>
+            <p>Powered by Brevo</p>
+            <p style="font-size: 12px; margin-top: 15px;">This is an automated test email. Your booking system is ready!</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+    sendSmtpEmail.sender = {
+      name: "Chaxx Barbershop Test",
+      email: process.env.BREVO_FROM_EMAIL
+    };
+    sendSmtpEmail.to = [{ email: testEmail }];
+
+    const response = await brevoClient.sendTransacEmail(sendSmtpEmail);
+    
+    console.log('✅ Test email sent successfully via Brevo');
+    console.log('   Message ID:', response.messageId);
     
     res.json({
       success: true,
-      message: 'Test email sent successfully',
+      message: '✅ Test email sent successfully! Check your inbox (and spam folder).',
       details: {
         to: testEmail,
-        messageId: info.messageId,
-        from: process.env.GMAIL_USER,
+        from: process.env.BREVO_FROM_EMAIL,
+        messageId: response.messageId,
         timestamp: new Date().toISOString()
-      }
+      },
+      brevo_benefits: [
+        '✅ 300 emails per day FREE forever',
+        '✅ Send to ANY email address (no restrictions)',
+        '✅ No credit card required',
+        '✅ Professional email tracking and analytics',
+        '✅ Works perfectly on Render'
+      ],
+      next_steps: [
+        '1. Check your email inbox (might take 1-2 minutes)',
+        '2. Check spam/junk folder if not in inbox',
+        '3. Create a test booking to verify customer emails',
+        '4. Monitor emails at: https://app.brevo.com/statistics/email'
+      ]
     });
   } catch (error) {
-    console.error('❌ Email test failed:', error);
+    console.error('❌ Brevo test failed:', error);
     
     res.status(500).json({
       success: false,
-      message: 'Email test failed',
+      message: 'Brevo test failed',
       error: {
         message: error.message,
-        code: error.code,
-        command: error.command,
-        response: error.response
+        body: error.body || 'No error details available'
       },
       troubleshooting: {
-        gmail_user_set: !!process.env.GMAIL_USER,
-        gmail_password_set: !!process.env.GMAIL_APP_PASSWORD,
-        environment: process.env.NODE_ENV || 'development'
+        api_key_configured: !!process.env.BREVO_API_KEY,
+        api_key_format: process.env.BREVO_API_KEY?.substring(0, 10) || 'not set',
+        from_email_configured: !!process.env.BREVO_FROM_EMAIL,
+        common_fixes: [
+          '1. Verify API key starts with "xkeysib-"',
+          '2. Check API key has "Send transactional emails" permission',
+          '3. Ensure Brevo account email is verified',
+          '4. Try regenerating API key if issues persist',
+          '5. Check you haven\'t exceeded daily limit (300/day free)'
+        ],
+        get_help: 'Visit https://app.brevo.com/settings/keys/api to manage your API keys'
       }
     });
   }
 });
+
 
 // app.post('/bookings', async (req, res) => {
 //   try {
@@ -2254,7 +2310,6 @@ app.get('/admin/blocked-slots', async (req, res) => {
     });
   }
 });
-
 
 app.use((req, res) => {
   res.status(404).json({
