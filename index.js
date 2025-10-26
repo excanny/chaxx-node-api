@@ -170,38 +170,383 @@ const createConfirmationEmail = (booking) => {
   return {
     subject: 'Booking Confirmation - Chaxx Barbershop',
     html: `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <style>
-    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-    .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
-    h1 { color: #2563eb; }
-    .details { background: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; }
-    .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; color: #6b7280; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>✅ Booking Confirmed!</h1>
-    <p>Hi ${booking.customer_name},</p>
-    <p>Your appointment at Chaxx Barbershop has been confirmed!</p>
-    <div class="details">
-      <p><strong>Date & Time:</strong> ${formattedDate}</p>
-      <p><strong>Phone:</strong> ${booking.phone_number}</p>
-      <p><strong>Payment Status:</strong> ${booking.payment_status}</p>
-      <p><strong>Booking ID:</strong> #${booking.id}</p>
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+      body { 
+        font-family: 'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', cursive, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        margin: 0;
+        padding: 0;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 25%, #f093fb 50%, #4facfe 75%, #00f2fe 100%);
+        background-size: 400% 400%;
+        animation: gradientShift 15s ease infinite;
+      }
+      @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      .email-wrapper {
+        padding: 40px 20px;
+      }
+      .container { 
+        max-width: 600px; 
+        margin: 0 auto; 
+        background-color: #ffffff;
+        border-radius: 30px;
+        overflow: hidden;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        border: 6px solid #fbbf24;
+        transform: rotate(-1deg);
+      }
+      .container-inner {
+        transform: rotate(1deg);
+      }
+      .header { 
+        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+        padding: 40px 30px;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+      }
+      .confetti {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        top: 0;
+        left: 0;
+        pointer-events: none;
+      }
+      .confetti span {
+        position: absolute;
+        font-size: 24px;
+        animation: fall 3s linear infinite;
+      }
+      .confetti span:nth-child(1) { left: 10%; animation-delay: 0s; }
+      .confetti span:nth-child(2) { left: 25%; animation-delay: 0.5s; }
+      .confetti span:nth-child(3) { left: 40%; animation-delay: 1s; }
+      .confetti span:nth-child(4) { left: 55%; animation-delay: 1.5s; }
+      .confetti span:nth-child(5) { left: 70%; animation-delay: 2s; }
+      .confetti span:nth-child(6) { left: 85%; animation-delay: 2.5s; }
+      @keyframes fall {
+        0% { top: -10%; transform: rotate(0deg); }
+        100% { top: 110%; transform: rotate(360deg); }
+      }
+      .party-icon {
+        font-size: 80px;
+        margin-bottom: 10px;
+        display: inline-block;
+        animation: bounce 1s ease infinite;
+      }
+      @keyframes bounce {
+        0%, 100% { transform: translateY(0) rotate(-5deg); }
+        50% { transform: translateY(-20px) rotate(5deg); }
+      }
+      .header h1 { 
+        margin: 0; 
+        font-size: 42px;
+        font-weight: 900;
+        color: #7c2d12;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        text-shadow: 3px 3px 0px #fef3c7;
+        position: relative;
+        z-index: 1;
+      }
+      .header p {
+        margin: 15px 0 0 0;
+        font-size: 20px;
+        color: #92400e;
+        font-weight: 700;
+        position: relative;
+        z-index: 1;
+      }
+      .content { 
+        padding: 40px 35px;
+        background-color: #ffffff;
+      }
+      .greeting {
+        font-size: 26px;
+        color: #7c3aed;
+        margin-bottom: 12px;
+        font-weight: 900;
+      }
+      .message {
+        font-size: 17px;
+        color: #1f2937;
+        margin-bottom: 35px;
+        line-height: 1.7;
+        font-weight: 600;
+      }
+      .fun-banner {
+        background: linear-gradient(135deg, #fde68a 0%, #fbbf24 100%);
+        padding: 20px;
+        border-radius: 20px;
+        text-align: center;
+        margin-bottom: 30px;
+        border: 4px dashed #f59e0b;
+        transform: rotate(-1deg);
+      }
+      .fun-banner p {
+        margin: 0;
+        font-size: 18px;
+        color: #78350f;
+        font-weight: 900;
+      }
+      .details-card {
+        background: linear-gradient(135deg, #ddd6fe 0%, #c4b5fd 100%);
+        border-radius: 25px;
+        padding: 30px;
+        margin: 25px 0;
+        border: 5px solid #7c3aed;
+        box-shadow: 8px 8px 0px #a78bfa;
+        position: relative;
+      }
+      .sticker {
+        position: absolute;
+        font-size: 50px;
+        transform: rotate(15deg);
+      }
+      .sticker-1 { top: -20px; right: -15px; }
+      .sticker-2 { bottom: -20px; left: -15px; transform: rotate(-20deg); }
+      .detail-item { 
+        display: flex;
+        align-items: center;
+        margin: 20px 0;
+        padding: 18px;
+        background-color: rgba(255, 255, 255, 0.9);
+        border-radius: 15px;
+        border: 3px solid #a78bfa;
+        transform: rotate(-0.5deg);
+      }
+      .detail-item:nth-child(even) {
+        transform: rotate(0.5deg);
+      }
+      .detail-emoji {
+        font-size: 32px;
+        margin-right: 15px;
+        animation: wiggle 2s ease-in-out infinite;
+      }
+      @keyframes wiggle {
+        0%, 100% { transform: rotate(-5deg); }
+        50% { transform: rotate(5deg); }
+      }
+      .detail-info {
+        flex: 1;
+      }
+      .label { 
+        font-size: 13px;
+        color: #5b21b6;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        display: block;
+        margin-bottom: 5px;
+      }
+      .value {
+        font-size: 16px;
+        color: #1f2937;
+        font-weight: 700;
+      }
+      .payment-badge {
+        display: inline-block;
+        padding: 8px 18px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transform: rotate(-3deg);
+      }
+      .payment-paid {
+        background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+        color: #ffffff;
+        box-shadow: 4px 4px 0px #059669;
+      }
+      .payment-unpaid {
+        background: linear-gradient(135deg, #fb923c 0%, #f97316 100%);
+        color: #ffffff;
+        box-shadow: 4px 4px 0px #ea580c;
+      }
+      .booking-id {
+        font-family: 'Courier New', monospace;
+        font-size: 15px;
+        color: #1f2937;
+        font-weight: 900;
+        background-color: #fef3c7;
+        padding: 5px 12px;
+        border-radius: 8px;
+        border: 2px solid #fbbf24;
+      }
+      .action-section {
+        text-align: center;
+        margin: 40px 0;
+      }
+      .button {
+        display: inline-block;
+        background: linear-gradient(135deg, #ec4899 0%, #db2777 100%);
+        color: #ffffff;
+        padding: 18px 45px;
+        text-decoration: none;
+        border-radius: 50px;
+        font-weight: 900;
+        font-size: 18px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        box-shadow: 6px 6px 0px #be185d;
+        border: 4px solid #ffffff;
+        transition: transform 0.2s;
+        animation: pulse 2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+      }
+      .speech-bubble {
+        background-color: #fef3c7;
+        border: 4px solid #fbbf24;
+        border-radius: 20px;
+        padding: 20px;
+        margin: 30px 0;
+        position: relative;
+        text-align: center;
+      }
+      .speech-bubble::after {
+        content: '';
+        position: absolute;
+        bottom: -20px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 0;
+        height: 0;
+        border-left: 20px solid transparent;
+        border-right: 20px solid transparent;
+        border-top: 20px solid #fbbf24;
+      }
+      .speech-bubble p {
+        margin: 0;
+        font-size: 16px;
+        color: #78350f;
+        font-weight: 800;
+      }
+      .footer { 
+        background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
+        padding: 35px; 
+        text-align: center;
+        color: #ffffff;
+      }
+      .footer-brand {
+        font-size: 28px;
+        font-weight: 900;
+        margin-bottom: 10px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        text-shadow: 3px 3px 0px rgba(0, 0, 0, 0.2);
+      }
+      .footer-text {
+        font-size: 14px;
+        margin: 8px 0;
+        font-weight: 600;
+        opacity: 0.95;
+      }
+      .wave {
+        display: inline-block;
+        animation: wave 1s ease-in-out infinite;
+      }
+      @keyframes wave {
+        0%, 100% { transform: rotate(0deg); }
+        25% { transform: rotate(20deg); }
+        75% { transform: rotate(-20deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="email-wrapper">
+      <div class="container">
+        <div class="container-inner">
+          <div class="header">
+            <h1>✂️ YOU'RE IN!</h1>
+            <p>Your Booking is Confirmed 🎉</p>
+          </div>
+          
+          <div class="content">
+            <p class="greeting">Hey ${booking.customer_name}! <span class="wave">👋</span></p>
+            <p class="message">
+              Get ready to look AMAZING! Your appointment at <strong>Chaxx Barbershop</strong> 
+              is confirmed and we're pumped to see you! ✂️✨
+            </p>
+            
+            <div class="fun-banner">
+              <p>🎊 Your Fresh Cut Adventure Starts Soon! 🎊</p>
+            </div>
+            
+            <div class="details-card">
+              <div class="detail-item">
+                <div class="detail-emoji">📅</div>
+                <div class="detail-info">
+                  <span class="label">When's the magic?</span>
+                  <div class="value">${formattedDate}</div>
+                </div>
+              </div>
+              
+              <div class="detail-item">
+                <div class="detail-emoji">📱</div>
+                <div class="detail-info">
+                  <span class="label">Ring Ring!</span>
+                  <div class="value">${booking.phone_number}</div>
+                </div>
+              </div>
+              
+              <div class="detail-item">
+                <div class="detail-emoji">💰</div>
+                <div class="detail-info">
+                  <span class="label">Payment Status</span>
+                  <div class="value">
+                    <span class="payment-badge payment-${booking.payment_status}">
+                      ${booking.payment_status === 'paid' ? '✓ ALL PAID!' : '⏳ PENDING'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="detail-item">
+                <div class="detail-emoji">🎫</div>
+                <div class="detail-info">
+                  <span class="label">Your Golden Ticket</span>
+                  <div class="value">
+                    <span class="booking-id">#${booking.id}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="speech-bubble">
+              <p>💡 Pro Tip: Come 5 mins early and you'll be our favorite person! 😎</p>
+            </div>
+
+
+            <p style="text-align: center; color: #6b7280; font-size: 15px; margin-top: 30px; font-weight: 700;">
+              Questions? We're here! Give us a shout anytime! 📞💬
+            </p>
+          </div>
+          
+          <div class="footer">
+            <div class="footer-brand">✂️ CHAXX BARBERSHOP ✂️</div>
+            <p class="footer-text">Where Every Cut is a Masterpiece! 🎨</p>
+            <p class="footer-text">📍 5649 Prefontaine Avenue, Regina SK</p>
+            <p class="footer-text">📞 +1 (306) 216-7657, +1 (306) 550-6583 | ✉️ hello@chaxxbarbershop.com</p>
+            <p class="footer-text" style="margin-top: 20px; font-size: 12px; opacity: 0.9;">
+              Spreading good vibes, one cut at a time.! 🎉
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
-    <p>We look forward to seeing you!</p>
-    <div class="footer">
-      <p><strong>Chaxx Barbershop</strong></p>
-      <p>📍 5649 Prefontaine Avenue, Regina SK</p>
-      <p>📞 +1 (306) 216-7657, +1 (306) 550-6583</p>
-    </div>
-  </div>
-</body>
-</html>
+  </body>
+  </html>
 `
   };
 };
