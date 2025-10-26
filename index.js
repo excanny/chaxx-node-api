@@ -3,9 +3,8 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
+const Mailjet = require('node-mailjet');
 require('dotenv').config();
-const brevo = require('@getbrevo/brevo');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -17,13 +16,12 @@ app.use(express.urlencoded({ extended: true }));
 
 // MongoDB configuration
 const MONGODB_URI = process.env.MONGODB_URI;
-//const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/test';
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('MongoDB connected successfully');
-    seedAdminUser(); // Seed admin user after connection
+    seedAdminUser();
   })
   .catch(err => {
     console.error('MongoDB connection failed:', err.message);
@@ -83,11 +81,11 @@ const bookingSchema = new mongoose.Schema({
 
 const blockedSlotSchema = new mongoose.Schema({
   date: {
-    type: String, // Format: YYYY-MM-DD
+    type: String,
     required: true
   },
   time_slot: {
-    type: String, // Format: "9:00 AM", "1:30 PM", or null for entire day
+    type: String,
     default: null
   },
   reason: {
@@ -106,11 +104,7 @@ const blockedSlotSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Compound index to prevent duplicate blocks
 blockedSlotSchema.index({ date: 1, time_slot: 1 }, { unique: true });
-
-
-// Indexes
 bookingSchema.index({ appointment_time: 1, status: 1 });
 bookingSchema.index({ email: 1 });
 
@@ -118,13 +112,27 @@ const User = mongoose.model('User', userSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const BlockedSlot = mongoose.model('BlockedSlot', blockedSlotSchema);
 
+// ================= MAILJET CONFIGURATION =================
+const mailjetClient = Mailjet.apiConnect(
+  process.env.MAILJET_API_KEY,
+  process.env.MAILJET_SECRET_KEY
+);
+
+// Verify configuration on startup
+if (process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY) {
+  console.log('✅ Mailjet API configured successfully');
+  console.log('📧 Sending from:', process.env.MAILJET_FROM_EMAIL);
+  console.log('   From name:', process.env.MAILJET_FROM_NAME || 'Chaxx Barbershop');
+} else {
+  console.warn('⚠️ MAILJET_API_KEY or MAILJET_SECRET_KEY not set - emails will fail');
+}
+
 // ================= SEED ADMIN USER =================
 async function seedAdminUser() {
   try {
     const adminEmail = 'admin@chaxxbarbers.com';
     const adminPassword = 'admin@chaxxbarbers';
     
-    // Check if admin user already exists
     const existingAdmin = await User.findOne({ email: adminEmail });
     
     if (existingAdmin) {
@@ -132,7 +140,6 @@ async function seedAdminUser() {
       return;
     }
     
-    // Create admin user
     const hashedPassword = await bcrypt.hash(adminPassword, 10);
     const adminUser = new User({
       name: 'Admin',
@@ -148,6 +155,314 @@ async function seedAdminUser() {
     console.error('Error seeding admin user:', error);
   }
 }
+
+// ================= EMAIL TEMPLATES =================
+const createConfirmationEmail = (booking) => {
+  const formattedDate = new Date(booking.appointment_time).toLocaleString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  return {
+    subject: 'Booking Confirmation - Chaxx Barbershop',
+    html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+    .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
+    h1 { color: #2563eb; }
+    .details { background: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>✅ Booking Confirmed!</h1>
+    <p>Hi ${booking.customer_name},</p>
+    <p>Your appointment at Chaxx Barbershop has been confirmed!</p>
+    <div class="details">
+      <p><strong>Date & Time:</strong> ${formattedDate}</p>
+      <p><strong>Phone:</strong> ${booking.phone_number}</p>
+      <p><strong>Payment Status:</strong> ${booking.payment_status}</p>
+      <p><strong>Booking ID:</strong> #${booking.id}</p>
+    </div>
+    <p>We look forward to seeing you!</p>
+    <div class="footer">
+      <p><strong>Chaxx Barbershop</strong></p>
+      <p>📍 5649 Prefontaine Avenue, Regina SK</p>
+      <p>📞 +1 (306) 216-7657, +1 (306) 550-6583</p>
+    </div>
+  </div>
+</body>
+</html>
+`
+  };
+};
+
+const createAdminNotificationEmail = (bookings) => {
+  const isBulk = bookings.length > 1;
+  
+  const bookingRows = bookings.map(booking => `
+    <tr>
+      <td><strong>${booking.customer_name}</strong></td>
+      <td>${booking.phone_number}</td>
+      <td>${booking.email || 'N/A'}</td>
+      <td>${new Date(booking.appointment_time).toLocaleString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        hour: '2-digit', 
+        minute: '2-digit'
+      })}</td>
+      <td>${booking.payment_status}</td>
+    </tr>
+  `).join('');
+
+  return {
+    subject: isBulk ? `New Bulk Booking: ${bookings.length} Appointments` : 'New Booking - Chaxx Barbershop',
+    html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+    .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
+    h1 { color: #2563eb; }
+    table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+    th { background: #2563eb; color: white; padding: 12px; text-align: left; }
+    td { padding: 12px; border-bottom: 1px solid #e5e7eb; }
+    tr:hover { background: #f9fafb; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔔 New Booking Alert</h1>
+    <p>${isBulk ? `${bookings.length} new appointments received` : 'A new appointment has been booked'}</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Phone</th>
+          <th>Email</th>
+          <th>Time</th>
+          <th>Payment</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${bookingRows}
+      </tbody>
+    </table>
+    <p style="color: #6b7280; margin-top: 30px;">Chaxx Barbershop Booking System</p>
+  </div>
+</body>
+</html>
+`
+  };
+};
+
+// ================= EMAIL SENDING FUNCTIONS =================
+const sendConfirmationEmail = async (booking) => {
+  console.log('\n🔵 sendConfirmationEmail called');
+  console.log('   Booking ID:', booking.id);
+  console.log('   Email:', booking.email);
+
+  if (!booking.email) {
+    console.log('   ⏭️ No email provided');
+    return { sent: false, reason: 'No email provided' };
+  }
+
+  if (!process.env.MAILJET_API_KEY || !process.env.MAILJET_SECRET_KEY) {
+    console.error('   ❌ Mailjet not configured');
+    return { sent: false, reason: 'Mailjet not configured' };
+  }
+
+  try {
+    const emailContent = createConfirmationEmail(booking);
+    console.log('   📝 Email content created');
+    console.log('   📤 Sending via Mailjet...');
+    
+    const request = mailjetClient
+      .post('send', { version: 'v3.1' })
+      .request({
+        Messages: [{
+          From: {
+            Email: process.env.MAILJET_FROM_EMAIL,
+            Name: process.env.MAILJET_FROM_NAME || 'Chaxx Barbershop'
+          },
+          To: [{
+            Email: booking.email,
+            Name: booking.customer_name
+          }],
+          Subject: emailContent.subject,
+          HTMLPart: emailContent.html
+        }]
+      });
+
+    const response = await request;
+    
+    if (response.body?.Messages?.[0]?.Status === 'success') {
+      const messageId = response.body.Messages[0].To[0].MessageID;
+      console.log('   ✅ Email sent! Message ID:', messageId);
+      return { sent: true, messageId, to: booking.email };
+    } else {
+      console.warn('   ⚠️ Unexpected response:', response.body);
+      return { sent: false, reason: 'Unexpected response', response: response.body };
+    }
+  } catch (error) {
+    console.error('   ❌ Email failed:', error.message);
+    return { sent: false, error: error.message, to: booking.email };
+  }
+};
+
+const sendAdminNotificationEmail = async (bookings) => {
+  const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
+  
+  console.log('\n🔵 sendAdminNotificationEmail called');
+  console.log('   Admin email:', adminEmail);
+  console.log('   Bookings count:', bookings.length);
+
+  if (!process.env.MAILJET_API_KEY || !process.env.MAILJET_SECRET_KEY) {
+    console.error('   ❌ Mailjet not configured');
+    return { sent: false, reason: 'Mailjet not configured' };
+  }
+
+  try {
+    const emailContent = createAdminNotificationEmail(bookings);
+    console.log('   📝 Admin email content created');
+    console.log('   📤 Sending via Mailjet...');
+    
+    const request = mailjetClient
+      .post('send', { version: 'v3.1' })
+      .request({
+        Messages: [{
+          From: {
+            Email: process.env.MAILJET_FROM_EMAIL,
+            Name: process.env.MAILJET_FROM_NAME || 'Chaxx Barbershop'
+          },
+          To: [{
+            Email: adminEmail,
+            Name: 'Admin'
+          }],
+          Subject: emailContent.subject,
+          HTMLPart: emailContent.html
+        }]
+      });
+
+    const response = await request;
+    
+    if (response.body?.Messages?.[0]?.Status === 'success') {
+      const messageId = response.body.Messages[0].To[0].MessageID;
+      console.log('   ✅ Admin email sent! Message ID:', messageId);
+      return { sent: true, messageId, email: adminEmail };
+    } else {
+      console.warn('   ⚠️ Unexpected response:', response.body);
+      return { sent: false, reason: 'Unexpected response', response: response.body };
+    }
+  } catch (error) {
+    console.error('   ❌ Admin email failed:', error.message);
+    return { sent: false, error: error.message, email: adminEmail };
+  }
+};
+
+// ================= HELPER FUNCTION =================
+const normalizeToSlotStart = (date) => {
+  const normalized = new Date(date);
+  normalized.setSeconds(0, 0);
+  normalized.setMinutes(Math.floor(normalized.getMinutes() / 30) * 30);
+  return normalized;
+};
+
+// ================= TEST ENDPOINTS =================
+app.get('/test-email', async (req, res) => {
+  const testEmail = req.query.email || process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
+  
+  if (!process.env.MAILJET_API_KEY || !process.env.MAILJET_SECRET_KEY) {
+    return res.status(500).json({
+      success: false,
+      message: 'Mailjet not configured'
+    });
+  }
+  
+  try {
+    console.log('🧪 Test email to:', testEmail);
+    
+    const request = mailjetClient
+      .post('send', { version: 'v3.1' })
+      .request({
+        Messages: [{
+          From: {
+            Email: process.env.MAILJET_FROM_EMAIL,
+            Name: 'Chaxx Test'
+          },
+          To: [{
+            Email: testEmail,
+            Name: 'Test User'
+          }],
+          Subject: '✅ Mailjet Working!',
+          HTMLPart: '<h1>Test Successful</h1><p>Mailjet is configured correctly!</p>'
+        }]
+      });
+
+    const response = await request;
+    console.log('✅ Test email sent');
+    
+    res.json({
+      success: true,
+      message: 'Test email sent!',
+      to: testEmail,
+      messageId: response.body.Messages[0].To[0].MessageID
+    });
+  } catch (error) {
+    console.error('❌ Test failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.post('/test-direct-email', async (req, res) => {
+  const { email, customer_name } = req.body;
+  
+  console.log('\n🧪 ========== DIRECT EMAIL TEST ==========');
+  console.log('Email:', email);
+  console.log('Name:', customer_name);
+  
+  try {
+    const testBooking = {
+      id: 'TEST_' + Date.now(),
+      customer_name: customer_name || 'Test Customer',
+      phone_number: '+1234567890',
+      email: email,
+      appointment_time: new Date(),
+      payment_status: 'unpaid'
+    };
+    
+    const result = await sendConfirmationEmail(testBooking);
+    
+    console.log('Result:', result);
+    console.log('✅ ========== TEST COMPLETE ==========\n');
+    
+    res.json({
+      success: true,
+      message: 'Direct test completed',
+      result: result
+    });
+  } catch (error) {
+    console.error('❌ Direct test error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 // ================= USERS ENDPOINTS =================
 app.get('/users', async (req, res) => {
@@ -229,7 +544,6 @@ app.post('/login', async (req, res) => {
       });
     }
 
-    // Convert to object and remove password
     const userObject = user.toObject();
     delete userObject.password;
 
@@ -273,7 +587,6 @@ app.get('/available-slots', async (req, res) => {
   }
 
   try {
-    // Helper function to convert 24hr to 12hr format with AM/PM
     const to12Hour = (hour, minute) => {
       const period = hour >= 12 ? 'PM' : 'AM';
       const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
@@ -281,7 +594,6 @@ app.get('/available-slots', async (req, res) => {
       return `${displayHour}:${displayMinute} ${period}`;
     };
 
-    // Generate 30-minute slots matching frontend logic
     const dateObj = new Date(date);
     const dayOfWeek = dateObj.getDay();
     const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
@@ -295,7 +607,6 @@ app.get('/available-slots', async (req, res) => {
       allSlots.push(to12Hour(hour, 30));
     }
 
-    // Check if entire day is blocked
     const fullDayBlock = await BlockedSlot.findOne({
       date: date,
       is_full_day: true
@@ -316,7 +627,6 @@ app.get('/available-slots', async (req, res) => {
       });
     }
 
-    // Get blocked time slots for this date
     const blockedSlots = await BlockedSlot.find({
       date: date,
       is_full_day: false
@@ -324,14 +634,12 @@ app.get('/available-slots', async (req, res) => {
 
     const blockedTimes = blockedSlots.map(block => block.time_slot);
 
-    // Create date range for the entire day
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     
     const endOfDay = new Date(date);
     endOfDay.setHours(23, 59, 59, 999);
 
-    // Fetch all bookings for this date
     const bookings = await Booking.find({
       appointment_time: {
         $gte: startOfDay,
@@ -340,7 +648,6 @@ app.get('/available-slots', async (req, res) => {
       status: { $ne: 'cancelled' }
     });
 
-    // Extract booked time slots (HH:MM format)
     const bookedSlots = bookings.map(booking => {
       const time = new Date(booking.appointment_time);
       const hour = time.getHours();
@@ -348,7 +655,6 @@ app.get('/available-slots', async (req, res) => {
       return to12Hour(hour, minute);
     });
 
-    // Filter out booked AND blocked slots
     const availableSlots = allSlots.filter(slot => 
       !bookedSlots.includes(slot) && !blockedTimes.includes(slot)
     );
@@ -374,1530 +680,17 @@ app.get('/available-slots', async (req, res) => {
   }
 });
 
-
-// Configure Gmail SMTP transporter with environment variables
-// const transporter = nodemailer.createTransport({
-//   service: 'gmail',
-//   auth: {
-//     user: process.env.GMAIL_USER, // Your Gmail address from .env
-//     pass: process.env.GMAIL_APP_PASSWORD // Gmail App Password from .env
-//   }
-// });
-
-// const transporter = nodemailer.createTransport({
-//   host: 'smtp.gmail.com',
-//   port: 587, // Explicit port
-//   secure: false, // Use STARTTLS
-//   auth: {
-//     user: process.env.GMAIL_USER,
-//     pass: process.env.GMAIL_APP_PASSWORD
-//   },
-//   tls: {
-//     rejectUnauthorized: true
-//   },
-//   // Add connection timeout
-//   connectionTimeout: 10000, // 10 seconds
-//   greetingTimeout: 5000,
-//   socketTimeout: 15000
-// });
-
-
-// Verify transporter configuration on startup
-// transporter.verify((error, success) => {
-//   if (error) {
-//     console.error('Email transporter configuration error:', error);
-//   } else {
-//     console.log('Email server is ready to send messages');
-//   }
-// });
-
-// transporter.verify((error, success) => {
-//   if (error) {
-//     console.error('❌ Email transporter configuration error:', {
-//       message: error.message,
-//       code: error.code,
-//       command: error.command,
-//       port: error.port || 'unknown'
-//     });
-//     console.error('🔍 Check these:');
-//     console.error('  1. GMAIL_USER is set:', !!process.env.GMAIL_USER);
-//     console.error('  2. GMAIL_APP_PASSWORD is set:', !!process.env.GMAIL_APP_PASSWORD);
-//     console.error('  3. Environment:', process.env.NODE_ENV || 'development');
-//   } else {
-//     console.log('✅ Email server is ready to send messages');
-//     console.log('📧 Sending from:', process.env.GMAIL_USER);
-//   }
-// });
-
-// Initialize Brevo API client
-const brevoClient = new brevo.TransactionalEmailsApi();
-const brevoApiKey = brevoClient.authentications['apiKey'];
-brevoApiKey.apiKey = process.env.BREVO_API_KEY;
-
-// Verify configuration on startup
-if (process.env.BREVO_API_KEY) {
-  console.log('✅ Brevo API configured successfully');
-  console.log('📧 Sending from:', process.env.BREVO_FROM_EMAIL);
-} else {
-  console.warn('⚠️ BREVO_API_KEY not set - emails will fail');
-}
-
-// Customer confirmation email
-const sendConfirmationEmail = async (booking) => {
-  if (!booking.email) {
-    console.log(`ℹ️ No email provided for booking ${booking.id}`);
-    return { sent: false, reason: 'No email provided' };
-  }
-
-  if (!process.env.BREVO_API_KEY) {
-    console.error('❌ BREVO_API_KEY not configured');
-    return { sent: false, reason: 'Brevo not configured' };
-  }
-
-  const emailContent = createConfirmationEmail(booking);
-
-  try {
-    console.log(`📤 Sending confirmation email via Brevo to ${booking.email}...`);
-    
-    const sendSmtpEmail = new brevo.SendSmtpEmail();
-    sendSmtpEmail.subject = emailContent.subject;
-    sendSmtpEmail.htmlContent = emailContent.html;
-    sendSmtpEmail.sender = {
-      name: "Chaxx Barbershop",
-      email: process.env.BREVO_FROM_EMAIL
-    };
-    sendSmtpEmail.to = [{ 
-      email: booking.email, 
-      name: booking.customer_name 
-    }];
-
-    const response = await brevoClient.sendTransacEmail(sendSmtpEmail);
-    
-    if (response && response.messageId) {
-      console.log(`✅ Confirmation email sent to ${booking.email}`);
-      console.log(`   Message ID: ${response.messageId}`);
-      
-      return { 
-        sent: true, 
-        messageId: response.messageId,
-        to: booking.email
-      };
-    } else {
-      console.warn(`⚠️ Unexpected Brevo response:`, response);
-      return {
-        sent: false,
-        reason: 'Unexpected response format',
-        response
-      };
-    }
-  } catch (error) {
-    console.error(`❌ Failed to send email to ${booking.email}:`, {
-      message: error.message,
-      body: error.body || 'N/A'
-    });
-    
-    return { 
-      sent: false, 
-      error: error.message,
-      to: booking.email
-    };
-  }
-};
-
-// Admin notification email
-const sendAdminNotificationEmail = async (bookings) => {
-  const adminEmail = process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
-  
-  if (!process.env.BREVO_API_KEY) {
-    console.error('❌ BREVO_API_KEY not configured');
-    return { sent: false, reason: 'Brevo not configured', email: adminEmail };
-  }
-
-  const emailContent = createAdminNotificationEmail(bookings);
-
-  try {
-    console.log(`📤 Sending admin notification via Brevo to ${adminEmail}...`);
-    
-    const sendSmtpEmail = new brevo.SendSmtpEmail();
-    sendSmtpEmail.subject = emailContent.subject;
-    sendSmtpEmail.htmlContent = emailContent.html;
-    sendSmtpEmail.sender = {
-      name: "Chaxx Barbershop Bookings",
-      email: process.env.BREVO_FROM_EMAIL
-    };
-    sendSmtpEmail.to = [{ email: adminEmail }];
-
-    const response = await brevoClient.sendTransacEmail(sendSmtpEmail);
-    
-    if (response && response.messageId) {
-      console.log(`✅ Admin notification sent to ${adminEmail} for ${bookings.length} booking(s)`);
-      console.log(`   Message ID: ${response.messageId}`);
-      
-      return { 
-        sent: true, 
-        email: adminEmail, 
-        messageId: response.messageId
-      };
-    } else {
-      console.warn(`⚠️ Unexpected Brevo response:`, response);
-      return {
-        sent: false,
-        reason: 'Unexpected response format',
-        email: adminEmail,
-        response
-      };
-    }
-  } catch (error) {
-    console.error(`❌ Failed to send admin notification to ${adminEmail}:`, {
-      message: error.message,
-      body: error.body || 'N/A'
-    });
-    
-    return { 
-      sent: false, 
-      error: error.message,
-      email: adminEmail
-    };
-  }
-};
-
-// Email template function for customer
-const createConfirmationEmail = (booking) => {
-  const formattedDate = new Date(booking.appointment_time).toLocaleString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-
-  return {
-    subject: 'Booking Confirmation - Chaxx Barbershop',
-    html: `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-      body { 
-        font-family: 'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', cursive, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        margin: 0;
-        padding: 0;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 25%, #f093fb 50%, #4facfe 75%, #00f2fe 100%);
-        background-size: 400% 400%;
-        animation: gradientShift 15s ease infinite;
-      }
-      @keyframes gradientShift {
-        0% { background-position: 0% 50%; }
-        50% { background-position: 100% 50%; }
-        100% { background-position: 0% 50%; }
-      }
-      .email-wrapper {
-        padding: 40px 20px;
-      }
-      .container { 
-        max-width: 600px; 
-        margin: 0 auto; 
-        background-color: #ffffff;
-        border-radius: 30px;
-        overflow: hidden;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-        border: 6px solid #fbbf24;
-        transform: rotate(-1deg);
-      }
-      .container-inner {
-        transform: rotate(1deg);
-      }
-      .header { 
-        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
-        padding: 40px 30px;
-        text-align: center;
-        position: relative;
-        overflow: hidden;
-      }
-      .party-icon {
-        font-size: 80px;
-        margin-bottom: 10px;
-        display: inline-block;
-        animation: bounce 1s ease infinite;
-      }
-      @keyframes bounce {
-        0%, 100% { transform: translateY(0) rotate(-5deg); }
-        50% { transform: translateY(-20px) rotate(5deg); }
-      }
-      .header h1 { 
-        margin: 0; 
-        font-size: 42px;
-        font-weight: 900;
-        color: #7c2d12;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        text-shadow: 3px 3px 0px #fef3c7;
-      }
-      .header p {
-        margin: 15px 0 0 0;
-        font-size: 20px;
-        color: #92400e;
-        font-weight: 700;
-      }
-      .content { 
-        padding: 40px 35px;
-        background-color: #ffffff;
-      }
-      .greeting {
-        font-size: 26px;
-        color: #7c3aed;
-        margin-bottom: 12px;
-        font-weight: 900;
-      }
-      .message {
-        font-size: 17px;
-        color: #1f2937;
-        margin-bottom: 35px;
-        line-height: 1.7;
-        font-weight: 600;
-      }
-      .fun-banner {
-        background: linear-gradient(135deg, #fde68a 0%, #fbbf24 100%);
-        padding: 20px;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 30px;
-        border: 4px dashed #f59e0b;
-        transform: rotate(-1deg);
-      }
-      .fun-banner p {
-        margin: 0;
-        font-size: 18px;
-        color: #78350f;
-        font-weight: 900;
-      }
-      .details-card {
-        background: linear-gradient(135deg, #ddd6fe 0%, #c4b5fd 100%);
-        border-radius: 25px;
-        padding: 30px;
-        margin: 25px 0;
-        border: 5px solid #7c3aed;
-        box-shadow: 8px 8px 0px #a78bfa;
-      }
-      .detail-item { 
-        display: flex;
-        align-items: center;
-        margin: 20px 0;
-        padding: 18px;
-        background-color: rgba(255, 255, 255, 0.9);
-        border-radius: 15px;
-        border: 3px solid #a78bfa;
-        transform: rotate(-0.5deg);
-      }
-      .detail-item:nth-child(even) {
-        transform: rotate(0.5deg);
-      }
-      .detail-emoji {
-        font-size: 32px;
-        margin-right: 15px;
-        animation: wiggle 2s ease-in-out infinite;
-      }
-      @keyframes wiggle {
-        0%, 100% { transform: rotate(-5deg); }
-        50% { transform: rotate(5deg); }
-      }
-      .detail-info {
-        flex: 1;
-      }
-      .label { 
-        font-size: 13px;
-        color: #5b21b6;
-        font-weight: 900;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        display: block;
-        margin-bottom: 5px;
-      }
-      .value {
-        font-size: 16px;
-        color: #1f2937;
-        font-weight: 700;
-      }
-      .payment-badge {
-        display: inline-block;
-        padding: 8px 18px;
-        border-radius: 20px;
-        font-size: 14px;
-        font-weight: 900;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        transform: rotate(-3deg);
-      }
-      .payment-paid {
-        background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-        color: #ffffff;
-        box-shadow: 4px 4px 0px #059669;
-      }
-      .payment-unpaid {
-        background: linear-gradient(135deg, #fb923c 0%, #f97316 100%);
-        color: #ffffff;
-        box-shadow: 4px 4px 0px #ea580c;
-      }
-      .booking-id {
-        font-family: 'Courier New', monospace;
-        font-size: 15px;
-        color: #1f2937;
-        font-weight: 900;
-        background-color: #fef3c7;
-        padding: 5px 12px;
-        border-radius: 8px;
-        border: 2px solid #fbbf24;
-      }
-      .speech-bubble {
-        background-color: #fef3c7;
-        border: 4px solid #fbbf24;
-        border-radius: 20px;
-        padding: 20px;
-        margin: 30px 0;
-        position: relative;
-        text-align: center;
-      }
-      .speech-bubble::after {
-        content: '';
-        position: absolute;
-        bottom: -20px;
-        left: 50%;
-        transform: translateX(-50%);
-        width: 0;
-        height: 0;
-        border-left: 20px solid transparent;
-        border-right: 20px solid transparent;
-        border-top: 20px solid #fbbf24;
-      }
-      .speech-bubble p {
-        margin: 0;
-        font-size: 16px;
-        color: #78350f;
-        font-weight: 800;
-      }
-      .footer { 
-        background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
-        padding: 35px; 
-        text-align: center;
-        color: #ffffff;
-      }
-      .footer-brand {
-        font-size: 28px;
-        font-weight: 900;
-        margin-bottom: 10px;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        text-shadow: 3px 3px 0px rgba(0, 0, 0, 0.2);
-      }
-      .footer-text {
-        font-size: 14px;
-        margin: 8px 0;
-        font-weight: 600;
-        opacity: 0.95;
-      }
-      .wave {
-        display: inline-block;
-        animation: wave 1s ease-in-out infinite;
-      }
-      @keyframes wave {
-        0%, 100% { transform: rotate(0deg); }
-        25% { transform: rotate(20deg); }
-        75% { transform: rotate(-20deg); }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="email-wrapper">
-      <div class="container">
-        <div class="container-inner">
-          <div class="header">
-            <div class="party-icon">🎉</div>
-            <h1>✂️ YOU'RE IN!</h1>
-            <p>Your Booking is Confirmed 🎉</p>
-          </div>
-          
-          <div class="content">
-            <p class="greeting">Hey ${booking.customer_name}! <span class="wave">👋</span></p>
-            <p class="message">
-              Get ready to look AMAZING! Your appointment at <strong>Chaxx Barbershop</strong> 
-              is confirmed and we're pumped to see you! ✂️✨
-            </p>
-            
-            <div class="fun-banner">
-              <p>🎊 Your Fresh Cut Adventure Starts Soon! 🎊</p>
-            </div>
-            
-            <div class="details-card">
-              <div class="detail-item">
-                <div class="detail-emoji">📅</div>
-                <div class="detail-info">
-                  <span class="label">When's the magic?</span>
-                  <div class="value">${formattedDate}</div>
-                </div>
-              </div>
-              
-              <div class="detail-item">
-                <div class="detail-emoji">📱</div>
-                <div class="detail-info">
-                  <span class="label">Ring Ring!</span>
-                  <div class="value">${booking.phone_number}</div>
-                </div>
-              </div>
-              
-              <div class="detail-item">
-                <div class="detail-emoji">💰</div>
-                <div class="detail-info">
-                  <span class="label">Payment Status</span>
-                  <div class="value">
-                    <span class="payment-badge payment-${booking.payment_status}">
-                      ${booking.payment_status === 'paid' ? '✓ ALL PAID!' : '⏳ PENDING'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              
-              <div class="detail-item">
-                <div class="detail-emoji">🎫</div>
-                <div class="detail-info">
-                  <span class="label">Your Golden Ticket</span>
-                  <div class="value">
-                    <span class="booking-id">#${booking.id}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="speech-bubble">
-              <p>💡 Pro Tip: Come 5 mins early and you'll be our favorite person! 😎</p>
-            </div>
-
-            <p style="text-align: center; color: #6b7280; font-size: 15px; margin-top: 30px; font-weight: 700;">
-              Questions? We're here! Give us a shout anytime! 📞💬
-            </p>
-          </div>
-          
-          <div class="footer">
-            <div class="footer-brand">✂️ CHAXX BARBERSHOP ✂️</div>
-            <p class="footer-text">Where Every Cut is a Masterpiece! 🎨</p>
-            <p class="footer-text">📍 5649 Prefontaine Avenue, Regina SK</p>
-            <p class="footer-text">📞 +1 (306) 216-7657, +1 (306) 550-6583</p>
-            <p class="footer-text" style="margin-top: 20px; font-size: 12px; opacity: 0.9;">
-              Spreading good vibes, one cut at a time! 🎉
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </body>
-  </html>
-`
-  };
-};
-
-// Email template function for admin
-const createAdminNotificationEmail = (bookings) => {
-  const isBulk = bookings.length > 1;
-  
-  const bookingRows = bookings.map(booking => `
-    <tr>
-      <td><strong>${booking.customer_name}</strong></td>
-      <td>${booking.phone_number}</td>
-      <td>${booking.email || 'N/A'}</td>
-      <td>${new Date(booking.appointment_time).toLocaleString('en-US', { 
-        month: 'short', 
-        day: 'numeric', 
-        year: 'numeric',
-        hour: '2-digit', 
-        minute: '2-digit'
-      })}</td>
-      <td><span class="badge badge-${booking.payment_status}">${booking.payment_status}</span></td>
-      <td><span class="booking-id">${booking.id}</span></td>
-    </tr>
-  `).join('');
-
-  return {
-    subject: isBulk ? `New Bulk Booking: ${bookings.length} Appointments` : 'New Booking Received - Chaxx Barbershop',
-    html: `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-      body { 
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-        line-height: 1.6; 
-        color: #1f2937; 
-        margin: 0;
-        padding: 0;
-        background-color: #f3f4f6;
-      }
-      .email-wrapper {
-        padding: 30px 15px;
-      }
-      .container { 
-        max-width: 900px; 
-        margin: 0 auto; 
-        background-color: #ffffff;
-        border-radius: 12px;
-        overflow: hidden;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
-      }
-      .header { 
-        background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
-        color: white; 
-        padding: 30px;
-        text-align: center;
-      }
-      .header h1 { 
-        margin: 0 0 8px 0; 
-        font-size: 28px;
-        font-weight: 700;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
-      }
-      .bell-icon {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        background-color: rgba(255, 255, 255, 0.2);
-        border-radius: 50%;
-        font-size: 20px;
-        animation: ring 2s ease-in-out infinite;
-      }
-      @keyframes ring {
-        0%, 100% { transform: rotate(0deg); }
-        10%, 30% { transform: rotate(-10deg); }
-        20%, 40% { transform: rotate(10deg); }
-      }
-      .subtitle {
-        margin: 0;
-        font-size: 15px;
-        opacity: 0.95;
-        font-weight: 500;
-      }
-      .content { 
-        padding: 30px;
-      }
-      .stats-grid {
-        display: table;
-        width: 100%;
-        margin-bottom: 30px;
-        border-spacing: 15px 0;
-      }
-      .stat-card {
-        display: table-cell;
-        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
-        padding: 20px;
-        border-radius: 10px;
-        text-align: center;
-        width: 33.33%;
-      }
-      .stat-card.paid {
-        background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
-      }
-      .stat-card.unpaid {
-        background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-      }
-      .stat-number {
-        font-size: 32px;
-        font-weight: 700;
-        color: #1e40af;
-        margin: 0 0 5px 0;
-      }
-      .stat-card.paid .stat-number {
-        color: #15803d;
-      }
-      .stat-card.unpaid .stat-number {
-        color: #b45309;
-      }
-      .stat-label {
-        font-size: 13px;
-        color: #6b7280;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        margin: 0;
-      }
-      .section-title {
-        font-size: 18px;
-        font-weight: 700;
-        color: #111827;
-        margin: 0 0 20px 0;
-        padding-bottom: 10px;
-        border-bottom: 2px solid #e5e7eb;
-      }
-      .table-wrapper {
-        overflow-x: auto;
-        border-radius: 8px;
-        border: 1px solid #e5e7eb;
-      }
-      table { 
-        width: 100%; 
-        border-collapse: collapse; 
-        background-color: white;
-      }
-      th { 
-        background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
-        color: white; 
-        padding: 14px 12px; 
-        text-align: left;
-        font-size: 13px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }
-      td { 
-        padding: 14px 12px; 
-        border-bottom: 1px solid #f3f4f6;
-        font-size: 14px;
-      }
-      tr:last-child td {
-        border-bottom: none;
-      }
-      tr:hover {
-        background-color: #f9fafb;
-      }
-      .badge {
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 12px;
-        font-size: 12px;
-        font-weight: 600;
-        text-transform: uppercase;
-      }
-      .badge-paid {
-        background-color: #d1fae5;
-        color: #065f46;
-      }
-      .badge-unpaid {
-        background-color: #fef3c7;
-        color: #92400e;
-      }
-      .booking-id {
-        font-family: 'Courier New', monospace;
-        background-color: #f3f4f6;
-        padding: 3px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-        color: #4b5563;
-      }
-      .footer { 
-        background-color: #f9fafb;
-        padding: 25px 30px; 
-        text-align: center; 
-        border-top: 1px solid #e5e7eb;
-      }
-      .footer-title {
-        font-size: 14px;
-        color: #374151;
-        margin: 0 0 8px 0;
-        font-weight: 600;
-      }
-      .footer-text {
-        font-size: 13px;
-        color: #6b7280;
-        margin: 5px 0;
-      }
-      .timestamp {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        background-color: #e0f2fe;
-        padding: 8px 16px;
-        border-radius: 6px;
-        font-size: 13px;
-        color: #0c4a6e;
-        font-weight: 500;
-        margin-top: 10px;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="email-wrapper">
-      <div class="container">
-        <div class="header">
-          <h1>
-            <span class="bell-icon">🔔</span>
-            New Booking Alert
-          </h1>
-          <p class="subtitle">${isBulk ? `${bookings.length} new appointments received` : 'A new appointment has been booked'}</p>
-        </div>
-        
-        <div class="content">
-          <div class="stats-grid">
-            <div class="stat-card">
-              <p class="stat-number">${isBulk ? bookings.length : 1}</p>
-              <p class="stat-label">Total Bookings</p>
-            </div>
-            <div class="stat-card paid">
-              <p class="stat-number">${bookings.filter(b => b.payment_status === 'paid').length}</p>
-              <p class="stat-label">Paid</p>
-            </div>
-            <div class="stat-card unpaid">
-              <p class="stat-number">${bookings.filter(b => b.payment_status === 'unpaid').length}</p>
-              <p class="stat-labelRetryClaude does not have the ability to run the code it generates yet.GContinuejavascript              <p class="stat-label">Unpaid</p>
-            </div>
-          </div>
-          
-          <h3 class="section-title">📋 Booking Details</h3>
-          <div class="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>Customer</th>
-                  <th>Phone</th>
-                  <th>Email</th>
-                  <th>Appointment</th>
-                  <th>Payment</th>
-                  <th>ID</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${bookingRows}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        
-        <div class="footer">
-          <p class="footer-title">Chaxx Barbershop Booking System</p>
-          <p class="footer-text">Automated notification • Do not reply to this email</p>
-          <div class="timestamp">
-            <span>🕐</span>
-            <span>${new Date().toLocaleString('en-US', { 
-              weekday: 'long', 
-              year: 'numeric', 
-              month: 'long', 
-              day: 'numeric', 
-              hour: '2-digit', 
-              minute: '2-digit' 
-            })}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  </body>
-  </html>
-`
-  };
-};
-
-// Test email endpoint
-app.get('/test-email', async (req, res) => {
-  const testEmail = req.query.email || process.env.ADMIN_EMAIL || 'godson.ihemere@gmail.com';
-  
-  if (!process.env.BREVO_API_KEY) {
-    return res.status(500).json({
-      success: false,
-      message: 'BREVO_API_KEY not configured',
-      instructions: [
-        '1. Sign up at https://www.brevo.com (free, no credit card)',
-        '2. Go to https://app.brevo.com/settings/keys/api',
-        '3. Click "Create a new API key"',
-        '4. Copy the key (starts with xkeysib-)',
-        '5. Add BREVO_API_KEY to your environment variables',
-        '6. Optional: Add BREVO_FROM_EMAIL and ADMIN_EMAIL'
-      ]
-    });
-  }
-  
-  try {
-    console.log('🧪 Testing Brevo email configuration...');
-    console.log('   API Key:', process.env.BREVO_API_KEY?.substring(0, 15) + '...');
-    console.log('   From:', process.env.BREVO_FROM_EMAIL);
-    console.log('   To:', testEmail);
-    
-    const sendSmtpEmail = new brevo.SendSmtpEmail();
-    sendSmtpEmail.subject = '✅ Brevo Email Working - Chaxx Barbershop!';
-    sendSmtpEmail.htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <style>
-          body { font-family: -apple-system, sans-serif; margin: 0; padding: 0; background: #f4f4f5; }
-          .container { max-width: 600px; margin: 40px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-          .header { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: white; padding: 40px; text-align: center; }
-          .header h1 { margin: 0; font-size: 32px; }
-          .content { padding: 40px; }
-          .success { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border-left: 4px solid #10b981; padding: 20px; border-radius: 8px; margin: 20px 0; }
-          .info { background: #f9fafb; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb; margin: 20px 0; }
-          .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #e5e7eb; }
-          .info-row:last-child { border-bottom: none; }
-          .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; color: #6b7280; }
-          .badge { display: inline-block; padding: 6px 12px; background: #dbeafe; color: #1e40af; border-radius: 6px; font-size: 12px; font-weight: 600; margin-top: 10px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>🎉 Email System Active!</h1>
-            <p>Your Brevo integration is working perfectly</p>
-          </div>
-          <div class="content">
-            <div class="success">
-              <strong style="color: #065f46; font-size: 18px;">✅ Success!</strong>
-              <p style="color: #047857; margin: 8px 0 0 0;">Your email system is fully operational. All booking confirmations will be delivered successfully to any email address!</p>
-            </div>
-            <div class="info">
-              <h3 style="margin: 0 0 12px 0; color: #1f2937;">📋 Test Details</h3>
-              <div class="info-row">
-                <span>Recipient:</span>
-                <strong>${testEmail}</strong>
-              </div>
-              <div class="info-row">
-                <span>Service:</span>
-                <strong>Brevo (Sendinblue)</strong>
-              </div>
-              <div class="info-row">
-                <span>Daily Limit:</span>
-                <strong>300 emails (FREE)</strong>
-              </div>
-              <div class="info-row">
-                <span>Timestamp:</span>
-                <strong>${new Date().toLocaleString()}</strong>
-              </div>
-            </div>
-            <div style="text-align: center;">
-              <div class="badge">✂️ Chaxx Barbershop Ready to Book</div>
-            </div>
-          </div>
-          <div class="footer">
-            <p><strong>Chaxx Barbershop Booking System</strong></p>
-            <p>Powered by Brevo</p>
-            <p style="font-size: 12px; margin-top: 15px;">This is an automated test email. Your booking system is ready!</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-    sendSmtpEmail.sender = {
-      name: "Chaxx Barbershop Test",
-      email: process.env.BREVO_FROM_EMAIL
-    };
-    sendSmtpEmail.to = [{ email: testEmail }];
-
-    const response = await brevoClient.sendTransacEmail(sendSmtpEmail);
-    
-    console.log('✅ Test email sent successfully via Brevo');
-    console.log('   Message ID:', response.messageId);
-    
-    res.json({
-      success: true,
-      message: '✅ Test email sent successfully! Check your inbox (and spam folder).',
-      details: {
-        to: testEmail,
-        from: process.env.BREVO_FROM_EMAIL,
-        messageId: response.messageId,
-        timestamp: new Date().toISOString()
-      },
-      brevo_benefits: [
-        '✅ 300 emails per day FREE forever',
-        '✅ Send to ANY email address (no restrictions)',
-        '✅ No credit card required',
-        '✅ Professional email tracking and analytics',
-        '✅ Works perfectly on Render'
-      ],
-      next_steps: [
-        '1. Check your email inbox (might take 1-2 minutes)',
-        '2. Check spam/junk folder if not in inbox',
-        '3. Create a test booking to verify customer emails',
-        '4. Monitor emails at: https://app.brevo.com/statistics/email'
-      ]
-    });
-  } catch (error) {
-    console.error('❌ Brevo test failed:', error);
-    
-    res.status(500).json({
-      success: false,
-      message: 'Brevo test failed',
-      error: {
-        message: error.message,
-        body: error.body || 'No error details available'
-      },
-      troubleshooting: {
-        api_key_configured: !!process.env.BREVO_API_KEY,
-        api_key_format: process.env.BREVO_API_KEY?.substring(0, 10) || 'not set',
-        from_email_configured: !!process.env.BREVO_FROM_EMAIL,
-        common_fixes: [
-          '1. Verify API key starts with "xkeysib-"',
-          '2. Check API key has "Send transactional emails" permission',
-          '3. Ensure Brevo account email is verified',
-          '4. Try regenerating API key if issues persist',
-          '5. Check you haven\'t exceeded daily limit (300/day free)'
-        ],
-        get_help: 'Visit https://app.brevo.com/settings/keys/api to manage your API keys'
-      }
-    });
-  }
-});
-
-
-// app.post('/bookings', async (req, res) => {
-//   try {
-//     // Check if it's a bulk booking request
-//     const isBulkBooking = Array.isArray(req.body);
-//     const bookingsData = isBulkBooking ? req.body : [req.body];
-
-//     // Validate all bookings first
-//     const validationErrors = [];
-//     bookingsData.forEach((booking, index) => {
-//       if (!booking.customer_name || !booking.phone_number || !booking.appointment_time) {
-//         validationErrors.push({
-//           index,
-//           customer_name: booking.customer_name || 'Unknown',
-//           message: 'Missing required fields',
-//           missing_fields: [
-//             !booking.customer_name && 'customer_name',
-//             !booking.phone_number && 'phone_number',
-//             !booking.appointment_time && 'appointment_time'
-//           ].filter(Boolean)
-//         });
-//       }
-      
-//       // Validate appointment_time format
-//       if (booking.appointment_time) {
-//         const appointmentDate = new Date(booking.appointment_time);
-//         if (isNaN(appointmentDate.getTime())) {
-//           validationErrors.push({
-//             index,
-//             customer_name: booking.customer_name || 'Unknown',
-//             message: 'Invalid appointment_time format',
-//             provided: booking.appointment_time
-//           });
-//         } else if (appointmentDate < new Date()) {
-//           validationErrors.push({
-//             index,
-//             customer_name: booking.customer_name || 'Unknown',
-//             message: 'Appointment time cannot be in the past',
-//             provided: booking.appointment_time
-//           });
-//         }
-//       }
-      
-//       // Validate pay_now is boolean if provided
-//       if (booking.pay_now !== undefined && typeof booking.pay_now !== 'boolean') {
-//         validationErrors.push({
-//           index,
-//           customer_name: booking.customer_name || 'Unknown',
-//           message: 'pay_now must be a boolean value (true or false)',
-//           provided: booking.pay_now
-//         });
-//       }
-
-//       // Validate email format if provided
-//       if (booking.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(booking.email)) {
-//         validationErrors.push({
-//           index,
-//           customer_name: booking.customer_name || 'Unknown',
-//           message: 'Invalid email format',
-//           provided: booking.email
-//         });
-//       }
-//     });
-
-//     if (validationErrors.length > 0) {
-//       return res.status(400).json({
-//         success: false,
-//         message: `Validation failed for ${validationErrors.length} booking(s)`,
-//         errors: validationErrors,
-//         total_requests: bookingsData.length
-//       });
-//     }
-
-//     // Process bookings
-//     const results = [];
-//     const conflicts = [];
-//     const emailResults = [];
-
-//     for (let i = 0; i < bookingsData.length; i++) {
-//       const { 
-//         customer_name, 
-//         phone_number, 
-//         email, 
-//         appointment_time,
-//         pay_now = false
-//       } = bookingsData[i];
-
-//       const appointmentDate = new Date(appointment_time);
-
-//       // Extract date and time for comparison
-//       const startOfSlot = new Date(appointmentDate);
-//       startOfSlot.setSeconds(0, 0);
-
-//       const endOfSlot = new Date(startOfSlot);
-//       endOfSlot.setMinutes(endOfSlot.getMinutes() + 59);
-//       endOfSlot.setSeconds(59, 999);
-
-//       // Check availability
-//       const existingBooking = await Booking.findOne({
-//         appointment_time: {
-//           $gte: startOfSlot,
-//           $lte: endOfSlot
-//         },
-//         status: { $ne: 'cancelled' }
-//       });
-
-//       if (existingBooking) {
-//         // Format the time slot for better readability
-//         const formattedTime = appointmentDate.toLocaleString('en-US', {
-//           weekday: 'short',
-//           year: 'numeric',
-//           month: 'short',
-//           day: 'numeric',
-//           hour: '2-digit',
-//           minute: '2-digit',
-//           hour12: true
-//         });
-
-//         conflicts.push({
-//           index: i,
-//           customer_name,
-//           phone_number,
-//           email: email || null,
-//           requested_time: appointment_time,
-//           formatted_time: formattedTime,
-//           message: 'This time slot is already booked',
-//           booked_by: {
-//             name: existingBooking.customer_name,
-//             booking_id: existingBooking._id
-//           },
-//           suggestion: 'Please select a different time slot or contact us for availability'
-//         });
-//         continue;
-//       }
-
-//       // Create booking with payment status based on pay_now
-//       const booking = new Booking({
-//         customer_name,
-//         phone_number,
-//         email: email || null,
-//         appointment_time: appointmentDate,
-//         status: 'pending',
-//         payment_status: pay_now ? 'paid' : 'unpaid'
-//       });
-
-//       await booking.save();
-
-//       // Send customer confirmation email
-//       const emailResult = await sendConfirmationEmail({
-//         id: booking._id,
-//         customer_name: booking.customer_name,
-//         phone_number: booking.phone_number,
-//         email: booking.email,
-//         appointment_time: booking.appointment_time,
-//         payment_status: booking.payment_status
-//       });
-
-//       emailResults.push({
-//         booking_id: booking._id,
-//         email: booking.email,
-//         ...emailResult
-//       });
-
-//       results.push({
-//         id: booking._id,
-//         customer_name: booking.customer_name,
-//         phone_number: booking.phone_number,
-//         email: booking.email,
-//         appointment_time: booking.appointment_time,
-//         status: booking.status,
-//         payment_status: booking.payment_status,
-//         pay_now,
-//         email_sent: emailResult.sent
-//       });
-//     }
-
-//     // Send admin notification if any bookings were successful
-//     let adminEmailResult = { sent: false };
-//     if (results.length > 0) {
-//       adminEmailResult = await sendAdminNotificationEmail(results);
-//     }
-
-//     // Handle different response scenarios
-    
-//     // Scenario 1: All bookings failed due to conflicts
-//     if (conflicts.length > 0 && results.length === 0) {
-//       return res.status(409).json({ // 409 Conflict is more appropriate than 422
-//         success: false,
-//         message: isBulkBooking 
-//           ? `All ${conflicts.length} time slot(s) are unavailable` 
-//           : 'The requested time slot is already booked',
-//         conflicts,
-//         suggestion: 'Please choose different time slot(s) and try again',
-//         total_requests: bookingsData.length,
-//         failed: conflicts.length
-//       });
-//     }
-
-//     // Scenario 2: Partial success (some bookings succeeded, some failed)
-//     if (isBulkBooking && conflicts.length > 0 && results.length > 0) {
-//       return res.status(207).json({ // 207 Multi-Status
-//         success: true,
-//         message: `Partial success: ${results.length} booking(s) created, ${conflicts.length} failed`,
-//         bookings: results,
-//         conflicts,
-//         summary: {
-//           total: bookingsData.length,
-//           successful: results.length,
-//           failed: conflicts.length,
-//           emails_sent: emailResults.filter(e => e.sent).length,
-//           emails_failed: emailResults.filter(e => !e.sent).length,
-//           admin_notified: adminEmailResult.sent
-//         }
-//       });
-//     }
-
-//     // Scenario 3: Complete success (bulk)
-//     if (isBulkBooking) {
-//       return res.status(201).json({
-//         success: true,
-//         message: `Successfully created ${results.length} booking(s)`,
-//         bookings: results,
-//         summary: {
-//           total: bookingsData.length,
-//           successful: results.length,
-//           failed: 0,
-//           emails_sent: emailResults.filter(e => e.sent).length,
-//           emails_failed: emailResults.filter(e => !e.sent).length,
-//           admin_notified: adminEmailResult.sent
-//         }
-//       });
-//     }
-
-//     // Scenario 4: Complete success (single booking)
-//     return res.status(201).json({
-//       success: true,
-//       message: 'Booking created successfully',
-//       booking: results[0],
-//       admin_notified: adminEmailResult.sent
-//     });
-
-//   } catch (error) {
-//     console.error('Error creating booking:', error);
-    
-//     // Handle specific error types
-//     if (error.name === 'ValidationError') {
-//       return res.status(400).json({ 
-//         success: false, 
-//         message: 'Database validation error',
-//         details: error.message
-//       });
-//     }
-
-//     if (error.name === 'MongoError' && error.code === 11000) {
-//       return res.status(409).json({ 
-//         success: false, 
-//         message: 'Duplicate booking detected',
-//         details: 'A booking with this information already exists'
-//       });
-//     }
-
-//     // Generic error response
-//     res.status(500).json({ 
-//       success: false, 
-//       message: 'An unexpected error occurred while processing your booking',
-//       error: process.env.NODE_ENV === 'development' ? error.message : undefined
-//     });
-//   }
-// });
-
-// app.post('/bookings', async (req, res) => {
-//   try {
-//     // Check if it's a bulk booking request
-//     const isBulkBooking = Array.isArray(req.body);
-//     const bookingsData = isBulkBooking ? req.body : [req.body];
-
-//     // Validate all bookings first
-//     const validationErrors = [];
-//     bookingsData.forEach((booking, index) => {
-//       if (!booking.customer_name || !booking.phone_number || !booking.appointment_time) {
-//         validationErrors.push({
-//           index,
-//           customer_name: booking.customer_name || 'Unknown',
-//           message: 'Missing required fields',
-//           missing_fields: [
-//             !booking.customer_name && 'customer_name',
-//             !booking.phone_number && 'phone_number',
-//             !booking.appointment_time && 'appointment_time'
-//           ].filter(Boolean)
-//         });
-//       }
-      
-//       // Validate appointment_time format
-//       if (booking.appointment_time) {
-//         const appointmentDate = new Date(booking.appointment_time);
-//         if (isNaN(appointmentDate.getTime())) {
-//           validationErrors.push({
-//             index,
-//             customer_name: booking.customer_name || 'Unknown',
-//             message: 'Invalid appointment_time format',
-//             provided: booking.appointment_time
-//           });
-//         } else if (appointmentDate < new Date()) {
-//           validationErrors.push({
-//             index,
-//             customer_name: booking.customer_name || 'Unknown',
-//             message: 'Appointment time cannot be in the past',
-//             provided: booking.appointment_time
-//           });
-//         }
-//       }
-      
-//       // Validate pay_now is boolean if provided
-//       if (booking.pay_now !== undefined && typeof booking.pay_now !== 'boolean') {
-//         validationErrors.push({
-//           index,
-//           customer_name: booking.customer_name || 'Unknown',
-//           message: 'pay_now must be a boolean value (true or false)',
-//           provided: booking.pay_now
-//         });
-//       }
-
-//       // Validate email format if provided
-//       if (booking.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(booking.email)) {
-//         validationErrors.push({
-//           index,
-//           customer_name: booking.customer_name || 'Unknown',
-//           message: 'Invalid email format',
-//           provided: booking.email
-//         });
-//       }
-//     });
-
-//     if (validationErrors.length > 0) {
-//       return res.status(400).json({
-//         success: false,
-//         message: `Validation failed for ${validationErrors.length} booking(s)`,
-//         errors: validationErrors,
-//         total_requests: bookingsData.length
-//       });
-//     }
-
-//     // Process bookings
-//     const results = [];
-//     const conflicts = [];
-//     const emailResults = [];
-
-//     for (let i = 0; i < bookingsData.length; i++) {
-//       const { 
-//         customer_name, 
-//         phone_number, 
-//         email, 
-//         appointment_time,
-//         pay_now = false
-//       } = bookingsData[i];
-
-//       const appointmentDate = new Date(appointment_time);
-
-//       // Extract date and time for comparison
-//       const startOfSlot = new Date(appointmentDate);
-//       startOfSlot.setSeconds(0, 0);
-
-//       const endOfSlot = new Date(startOfSlot);
-//       endOfSlot.setMinutes(endOfSlot.getMinutes() + 59);
-//       endOfSlot.setSeconds(59, 999);
-
-//       // Check availability
-//       const existingBooking = await Booking.findOne({
-//         appointment_time: {
-//           $gte: startOfSlot,
-//           $lte: endOfSlot
-//         },
-//         status: { $ne: 'cancelled' }
-//       });
-
-//       if (existingBooking) {
-//         // Format the time slot for better readability
-//         const formattedTime = appointmentDate.toLocaleString('en-US', {
-//           weekday: 'short',
-//           year: 'numeric',
-//           month: 'short',
-//           day: 'numeric',
-//           hour: '2-digit',
-//           minute: '2-digit',
-//           hour12: true
-//         });
-
-//         conflicts.push({
-//           index: i,
-//           customer_name,
-//           phone_number,
-//           email: email || null,
-//           requested_time: appointment_time,
-//           formatted_time: formattedTime,
-//           message: 'This time slot is already booked',
-//           booked_by: {
-//             name: existingBooking.customer_name,
-//             booking_id: existingBooking._id
-//           },
-//           suggestion: 'Please select a different time slot or contact us for availability'
-//         });
-//         continue;
-//       }
-
-//       // Create booking with payment status based on pay_now
-//       const booking = new Booking({
-//         customer_name,
-//         phone_number,
-//         email: email || null,
-//         appointment_time: appointmentDate,
-//         status: 'pending',
-//         payment_status: pay_now ? 'paid' : 'unpaid'
-//       });
-
-//       await booking.save();
-
-//       // Send customer confirmation email
-//       const emailResult = await sendConfirmationEmail({
-//         id: booking._id,
-//         customer_name: booking.customer_name,
-//         phone_number: booking.phone_number,
-//         email: booking.email,
-//         appointment_time: booking.appointment_time,
-//         payment_status: booking.payment_status
-//       });
-
-//       emailResults.push({
-//         booking_id: booking._id,
-//         email: booking.email,
-//         ...emailResult
-//       });
-
-//       results.push({
-//         id: booking._id,
-//         customer_name: booking.customer_name,
-//         phone_number: booking.phone_number,
-//         email: booking.email,
-//         appointment_time: booking.appointment_time,
-//         status: booking.status,
-//         payment_status: booking.payment_status,
-//         pay_now,
-//         email_sent: emailResult.sent
-//       });
-//     }
-
-//     // Send admin notification if any bookings were successful
-//     let adminEmailResult = { sent: false };
-//     if (results.length > 0) {
-//       adminEmailResult = await sendAdminNotificationEmail(results);
-//     }
-
-//     // Handle different response scenarios
-    
-//     // Scenario 1: All bookings failed due to conflicts
-//     if (conflicts.length > 0 && results.length === 0) {
-//       return res.status(409).json({
-//         success: false,
-//         message: isBulkBooking 
-//           ? `All ${conflicts.length} time slot(s) are unavailable` 
-//           : 'The requested time slot is already booked',
-//         conflicts,
-//         suggestion: 'Please choose different time slot(s) and try again',
-//         total_requests: bookingsData.length,
-//         failed: conflicts.length
-//       });
-//     }
-
-//     // Scenario 2: Partial success (some bookings succeeded, some failed)
-//     if (isBulkBooking && conflicts.length > 0 && results.length > 0) {
-//       return res.status(207).json({
-//         success: true,
-//         message: `Partial success: ${results.length} booking(s) created, ${conflicts.length} failed`,
-//         bookings: results,
-//         conflicts,
-//         summary: {
-//           total: bookingsData.length,
-//           successful: results.length,
-//           failed: conflicts.length,
-//           emails_sent: emailResults.filter(e => e.sent).length,
-//           emails_failed: emailResults.filter(e => !e.sent).length,
-//           admin_notified: adminEmailResult.sent
-//         }
-//       });
-//     }
-
-//     // Scenario 3: Complete success (bulk)
-//     if (isBulkBooking) {
-//       return res.status(201).json({
-//         success: true,
-//         message: `Successfully created ${results.length} booking(s)`,
-//         bookings: results,
-//         summary: {
-//           total: bookingsData.length,
-//           successful: results.length,
-//           failed: 0,
-//           emails_sent: emailResults.filter(e => e.sent).length,
-//           emails_failed: emailResults.filter(e => !e.sent).length,
-//           admin_notified: adminEmailResult.sent
-//         }
-//       });
-//     }
-
-//     // Scenario 4: Complete success (single booking)
-//     // FIXED: Admin notification is now sent before this response
-//     return res.status(201).json({
-//       success: true,
-//       message: 'Booking created successfully',
-//       booking: results[0],
-//       email_sent: emailResults[0]?.sent || false,
-//       admin_notified: adminEmailResult.sent
-//     });
-
-//   } catch (error) {
-//     console.error('Error creating booking:', error);
-    
-//     // Handle specific error types
-//     if (error.name === 'ValidationError') {
-//       return res.status(400).json({ 
-//         success: false, 
-//         message: 'Database validation error',
-//         details: error.message
-//       });
-//     }
-
-//     if (error.name === 'MongoError' && error.code === 11000) {
-//       return res.status(409).json({ 
-//         success: false, 
-//         message: 'Duplicate booking detected',
-//         details: 'A booking with this information already exists'
-//       });
-//     }
-
-//     // Generic error response
-//     res.status(500).json({ 
-//       success: false, 
-//       message: 'An unexpected error occurred while processing your booking',
-//       error: process.env.NODE_ENV === 'development' ? error.message : undefined
-//     });
-//   }
-// });
-
-// ================= OPTIMIZED BOOKINGS ENDPOINT =================
-
-// Helper function to normalize appointment times to 30-minute slot boundaries
-const normalizeToSlotStart = (date) => {
-  const normalized = new Date(date);
-  normalized.setSeconds(0, 0);
-  // Round down to nearest 30-minute slot (0 or 30 minutes)
-  normalized.setMinutes(Math.floor(normalized.getMinutes() / 30) * 30);
-  return normalized;
-};
-
 app.post('/bookings', async (req, res) => {
+  console.log('\n🟢 ========== NEW BOOKING REQUEST ==========');
+  console.log('Request body:', JSON.stringify(req.body, null, 2));
+  
   try {
     const isBulkBooking = Array.isArray(req.body);
     const bookingsData = isBulkBooking ? req.body : [req.body];
+    console.log(`Processing ${bookingsData.length} booking(s)`);
 
-    // ============= STEP 1: FAST VALIDATION =============
+    // STEP 1: VALIDATION
+    console.log('\n📋 Step 1: Validating...');
     const validationErrors = [];
     const validBookings = [];
     
@@ -1905,7 +698,6 @@ app.post('/bookings', async (req, res) => {
       const booking = bookingsData[i];
       const errors = [];
 
-      // Required fields check
       if (!booking.customer_name) errors.push('customer_name');
       if (!booking.phone_number) errors.push('phone_number');
       if (!booking.appointment_time) errors.push('appointment_time');
@@ -1920,7 +712,6 @@ app.post('/bookings', async (req, res) => {
         continue;
       }
 
-      // Validate appointment time
       const appointmentDate = new Date(booking.appointment_time);
       if (isNaN(appointmentDate.getTime())) {
         validationErrors.push({
@@ -1932,7 +723,6 @@ app.post('/bookings', async (req, res) => {
         continue;
       }
 
-      // Check if appointment is in the past
       if (appointmentDate < new Date()) {
         validationErrors.push({
           index: i,
@@ -1943,44 +733,21 @@ app.post('/bookings', async (req, res) => {
         continue;
       }
 
-      // Validate pay_now boolean
-      if (booking.pay_now !== undefined && typeof booking.pay_now !== 'boolean') {
-        validationErrors.push({
-          index: i,
-          customer_name: booking.customer_name,
-          message: 'pay_now must be a boolean value (true or false)',
-          provided: booking.pay_now
-        });
-        continue;
-      }
-
-      // Validate email format
-      if (booking.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(booking.email)) {
-        validationErrors.push({
-          index: i,
-          customer_name: booking.customer_name,
-          message: 'Invalid email format',
-          provided: booking.email
-        });
-        continue;
-      }
-
-      // Add to valid bookings
       validBookings.push({ ...booking, index: i, appointmentDate });
     }
+    
+    console.log(`   Valid: ${validBookings.length}, Invalid: ${validationErrors.length}`);
 
-    // If all bookings failed validation, return early
     if (validationErrors.length === bookingsData.length) {
       return res.status(400).json({
         success: false,
         message: `Validation failed for all ${validationErrors.length} booking(s)`,
-        errors: validationErrors,
-        total_requests: bookingsData.length
+        errors: validationErrors
       });
     }
 
-    // ============= STEP 2: BATCH CONFLICT CHECK (SINGLE QUERY) =============
-    // Normalize all times to 30-minute boundaries and group duplicates
+    // STEP 2: CONFLICT CHECK
+    console.log('\n🔍 Step 2: Checking conflicts...');
     const timeSlotMap = new Map();
     
     validBookings.forEach(booking => {
@@ -1993,21 +760,17 @@ app.post('/bookings', async (req, res) => {
       timeSlotMap.get(timeKey).push(booking);
     });
 
-    // Get all unique time slots to check
     const timeSlots = Array.from(timeSlotMap.keys()).map(t => new Date(t));
     
-    // SINGLE DATABASE QUERY - Check all time slots at once
     const existingBookings = await Booking.find({
       appointment_time: { $in: timeSlots },
       status: { $ne: 'cancelled' }
-    }).lean(); // .lean() for faster queries (returns plain JS objects)
+    }).lean();
 
-    // Create Set of already booked time slots for O(1) lookup
     const bookedTimeSlots = new Set(
       existingBookings.map(b => new Date(b.appointment_time).getTime())
     );
 
-    // ============= STEP 3: SEPARATE CONFLICTS FROM VALID BOOKINGS =============
     const conflicts = [];
     const bookingsToCreate = [];
 
@@ -2016,66 +779,39 @@ app.post('/bookings', async (req, res) => {
       const timeKey = normalizedTime.getTime();
 
       if (bookedTimeSlots.has(timeKey)) {
-        // Slot is already booked - add to conflicts
-        const formattedTime = booking.appointmentDate.toLocaleString('en-US', {
-          weekday: 'short',
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: true
-        });
-
         conflicts.push({
           index: booking.index,
           customer_name: booking.customer_name,
-          phone_number: booking.phone_number,
-          email: booking.email || null,
-          requested_time: booking.appointment_time,
-          formatted_time: formattedTime,
-          message: 'This time slot is already booked',
-          suggestion: 'Please select a different time slot or contact us for availability'
+          message: 'Time slot already booked'
         });
       } else {
-        // Slot is available - prepare for insert
         bookingsToCreate.push({
           customer_name: booking.customer_name,
           phone_number: booking.phone_number,
           email: booking.email || null,
           appointment_time: normalizedTime,
           status: 'pending',
-          payment_status: booking.pay_now ? 'paid' : 'unpaid',
-          originalIndex: booking.index,
-          pay_now: booking.pay_now || false
+          payment_status: booking.pay_now ? 'paid' : 'unpaid'
         });
-        
-        // Mark this slot as booked to prevent duplicates within same request
         bookedTimeSlots.add(timeKey);
       }
     });
+    
+    console.log(`   To create: ${bookingsToCreate.length}, Conflicts: ${conflicts.length}`);
 
-    // ============= STEP 4: HANDLE ALL CONFLICTS CASE =============
     if (bookingsToCreate.length === 0) {
-      const allErrors = [...validationErrors, ...conflicts];
       return res.status(409).json({
         success: false,
-        message: isBulkBooking 
-          ? `All ${allErrors.length} time slot(s) are unavailable` 
-          : 'The requested time slot is already booked',
-        conflicts: allErrors,
-        suggestion: 'Please choose different time slot(s) and try again',
-        total_requests: bookingsData.length,
-        failed: allErrors.length
+        message: 'All time slots unavailable',
+        conflicts: [...validationErrors, ...conflicts]
       });
     }
 
-    // ============= STEP 5: BULK INSERT ALL BOOKINGS =============
-    const createdBookings = await Booking.insertMany(bookingsToCreate, { 
-      ordered: false // Continue inserting even if some fail
-    });
+    // STEP 3: INSERT BOOKINGS
+    console.log('\n💾 Step 3: Inserting bookings...');
+    const createdBookings = await Booking.insertMany(bookingsToCreate, { ordered: false });
+    console.log(`   ✅ Inserted ${createdBookings.length} bookings`);
 
-    // Prepare results
     const results = createdBookings.map(booking => ({
       id: booking._id,
       customer_name: booking.customer_name,
@@ -2086,89 +822,87 @@ app.post('/bookings', async (req, res) => {
       payment_status: booking.payment_status
     }));
 
-    // ============= STEP 6: SEND EMAILS ASYNCHRONOUSLY =============
-    // Don't wait for emails - send response immediately
-    setImmediate(async () => {
-      try {
-        // Send customer confirmation emails in parallel
-        const customerEmailPromises = createdBookings
-          .filter(b => b.email)
-          .map(booking => 
-            sendConfirmationEmail({
-              id: booking._id,
-              customer_name: booking.customer_name,
-              phone_number: booking.phone_number,
-              email: booking.email,
-              appointment_time: booking.appointment_time,
-              payment_status: booking.payment_status
-            }).catch(err => {
-              console.error(`Customer email failed for ${booking.email}:`, err.message);
-              return { sent: false, error: err.message };
-            })
-          );
+    // STEP 4: SEND EMAILS
+    console.log('\n📧 ========== SENDING EMAILS ==========');
+    console.log(`Total bookings: ${createdBookings.length}`);
+    console.log(`With emails: ${createdBookings.filter(b => b.email).length}`);
+    
+    const emailResults = {
+      customer_emails: [],
+      admin_email: null
+    };
 
-        // Send admin notification email
-        const adminEmailPromise = sendAdminNotificationEmail(results).catch(err => {
-          console.error('Admin notification failed:', err.message);
-          return { sent: false, error: err.message };
+    // Customer emails
+    for (const booking of createdBookings) {
+      if (booking.email) {
+        console.log(`\n📤 Sending to: ${booking.email}`);
+        const result = await sendConfirmationEmail({
+          id: booking._id,
+          customer_name: booking.customer_name,
+          phone_number: booking.phone_number,
+          email: booking.email,
+          appointment_time: booking.appointment_time,
+          payment_status: booking.payment_status
         });
-
-        // Execute all emails in parallel
-        await Promise.all([...customerEmailPromises, adminEmailPromise]);
-        
-        console.log(`Background emails completed for ${results.length} booking(s)`);
-      } catch (error) {
-        console.error('Background email processing error:', error);
+        emailResults.customer_emails.push(result);
       }
-    });
+    }
 
-    // ============= STEP 7: SEND IMMEDIATE RESPONSE =============
+    // Admin email
+    console.log('\n📤 Sending admin notification...');
+    const adminResult = await sendAdminNotificationEmail(results);
+    emailResults.admin_email = adminResult;
+
+    console.log('\n✅ ========== EMAILS COMPLETE ==========\n');
+
+    // STEP 5: RESPONSE
     const allErrors = [...validationErrors, ...conflicts];
 
-    // Scenario: Partial success
     if (isBulkBooking && allErrors.length > 0) {
       return res.status(207).json({
         success: true,
-        message: `Partial success: ${results.length} booking(s) created, ${allErrors.length} failed`,
+        message: `Partial success: ${results.length} created, ${allErrors.length} failed`,
         bookings: results,
         conflicts: allErrors,
+        email_results: emailResults,
         summary: {
           total: bookingsData.length,
           successful: results.length,
           failed: allErrors.length,
-          emails_processing: true
+          emails_sent: emailResults.customer_emails.filter(e => e.sent).length,
+          admin_notified: emailResults.admin_email?.sent || false
         }
       });
     }
 
-    // Scenario: Complete success (bulk)
     if (isBulkBooking) {
       return res.status(201).json({
         success: true,
         message: `Successfully created ${results.length} booking(s)`,
         bookings: results,
+        email_results: emailResults,
         summary: {
           total: bookingsData.length,
           successful: results.length,
           failed: 0,
-          emails_processing: true
+          emails_sent: emailResults.customer_emails.filter(e => e.sent).length,
+          admin_notified: emailResults.admin_email?.sent || false
         }
       });
     }
 
-    // Scenario: Complete success (single booking)
     return res.status(201).json({
       success: true,
       message: 'Booking created successfully',
       booking: results[0],
-      email_processing: !!results[0].email,
-      admin_notified: true
+      email_sent: emailResults.customer_emails[0]?.sent || false,
+      admin_notified: emailResults.admin_email?.sent || false,
+      email_details: emailResults
     });
 
   } catch (error) {
-    console.error('Error creating booking:', error);
+    console.error('❌ Error creating booking:', error);
     
-    // Handle specific MongoDB errors
     if (error.name === 'ValidationError') {
       return res.status(400).json({ 
         success: false, 
@@ -2185,15 +919,15 @@ app.post('/bookings', async (req, res) => {
       });
     }
 
-    // Generic error response
     res.status(500).json({ 
       success: false, 
-      message: 'An unexpected error occurred while processing your booking',
+      message: 'An unexpected error occurred',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
+// ================= BLOCKED SLOTS ENDPOINTS =================
 app.post('/admin/block-slot', async (req, res) => {
   const { date, time_slot, reason, is_full_day } = req.body;
 
@@ -2235,7 +969,6 @@ app.post('/admin/block-slot', async (req, res) => {
   }
 });
 
-// Unblock a specific time slot or entire day
 app.delete('/admin/unblock-slot', async (req, res) => {
   const { date, time_slot, is_full_day } = req.body;
 
@@ -2278,7 +1011,6 @@ app.delete('/admin/unblock-slot', async (req, res) => {
   }
 });
 
-// Get all blocked slots
 app.get('/admin/blocked-slots', async (req, res) => {
   const { date, start_date, end_date } = req.query;
 
@@ -2311,12 +1043,12 @@ app.get('/admin/blocked-slots', async (req, res) => {
   }
 });
 
+// ================= 404 HANDLER =================
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: 'Endpoint not found',
-    requested: req.path,
-    uri: req.originalUrl
+    requested: req.path
   });
 });
 
@@ -2329,7 +1061,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
+// ================= START SERVER =================
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
